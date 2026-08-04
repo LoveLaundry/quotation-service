@@ -8,5 +8,6 @@ class Quotation(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     item_name: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False, index=True)
     size: Mapped[str] = mapped_column(String, nullable=False)
     unit_price_with_options: Mapped[dict] = mapped_column(JSON, nullable=False)

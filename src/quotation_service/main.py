@@ -51,6 +51,21 @@ def create_quotation(
     quotation: QuotationCreate,
     db: Session = Depends(get_db),
 ):
+    existing = (
+        db.query(Quotation)
+        .filter(
+            Quotation.category == quotation.category,
+            Quotation.item_name == quotation.item_name,
+        )
+        .first()
+    )
+
+    if existing is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="A quotation item with this name already exists for this category",
+        )
+
     new_quotation = Quotation(**quotation.model_dump())
 
     db.add(new_quotation)
