@@ -8,7 +8,9 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "alembic>=1.18.5",
     "fastapi[standard]>=0.141.1",
+    "psycopg[binary]>=3.3.4",
     "uvicorn>=0.52.1",
 ]
 
