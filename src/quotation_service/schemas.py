@@ -1,4 +1,5 @@
-from pydantic import BaseModel, Field
+from datetime import datetime
+from pydantic import BaseModel, Field, field_serializer
 
 
 class LineItemSchema(BaseModel):
@@ -28,7 +29,13 @@ class QuotationResponse(BaseModel):
     quotation_title: str | None
     line_items: list[dict]
     status: str
-    created_at: str | None
-    updated_at: str | None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @field_serializer('created_at', 'updated_at')
+    def serialize_datetime(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return value.isoformat()
 
     model_config = {"from_attributes": True}
