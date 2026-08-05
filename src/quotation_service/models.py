@@ -1,13 +1,23 @@
+from sqlalchemy import String, Integer, JSON, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Integer, Float, JSON
 
 from .database import Base
+
 
 class Quotation(Base):
     __tablename__ = "quotations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    item_name: Mapped[str] = mapped_column(String, nullable=False)
-    category: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    size: Mapped[str] = mapped_column(String, nullable=False)
-    unit_price_with_options: Mapped[dict] = mapped_column(JSON, nullable=False)
+    client_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    quotation_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    line_items: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="draft")
+    created_at: Mapped[str | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=True
+    )
+    updated_at: Mapped[str | None] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=True,
+    )
