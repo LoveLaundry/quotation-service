@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Union
 from pydantic import BaseModel, Field, field_serializer
 
 
@@ -24,7 +25,7 @@ class QuotationUpdate(BaseModel):
 
 
 class QuotationResponse(BaseModel):
-    id: int
+    id: Union[int, str]  # MongoDB uses string IDs, PostgreSQL uses integer IDs
     client_name: str
     quotation_title: str | None
     line_items: list[dict]

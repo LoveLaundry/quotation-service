@@ -14,7 +14,11 @@ engine = create_engine(DATABASE_URL)
 
 print("Dropping existing quotations table...")
 with engine.connect() as conn:
-    conn.execute(text("DROP TABLE IF EXISTS quotations CASCADE"))
+    # SQLite doesn't support CASCADE, so just drop the table
+    if "sqlite" in DATABASE_URL:
+        conn.execute(text("DROP TABLE IF EXISTS quotations"))
+    else:
+        conn.execute(text("DROP TABLE IF EXISTS quotations CASCADE"))
     conn.commit()
 
 print("Recreating tables with new schema...")
