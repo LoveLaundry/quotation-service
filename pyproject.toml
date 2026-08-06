@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "DulshanSiriwardhana", email = "dulshansiriwardhanaofficial@gmail.com" }
 ]
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.14,<3.16"
 dependencies = [
     "alembic>=1.18.5",
     "fastapi[standard]>=0.141.1",
