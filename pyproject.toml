@@ -14,7 +14,15 @@ dependencies = [
     "uvicorn>=0.52.1",
     "pymongo>=4.10.1",
     "motor>=3.6.0",
+    "pydantic[email]>=2.13.4",
+    "pydantic-settings>=2.5.2",
+    "python-dotenv>=1.2.2",
+    "cryptography>=42.0.0",
+    "pyjwt>=2.7.0",
+    "bcrypt>=4.0.0",
+    "python-multipart>=0.0.9",
 ]
+
 
 [project.scripts]
 quotation-service = "quotation_service:main"
