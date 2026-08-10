@@ -1,17 +1,17 @@
 [project]
 name = "quotation-service"
 version = "0.1.0"
-description = "Add your description here"
+description = "Quotation Service API"
 readme = "README.md"
 authors = [
     { name = "DulshanSiriwardhana", email = "dulshansiriwardhanaofficial@gmail.com" }
 ]
-requires-python = ">=3.14,<3.16"
+requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.18.5",
-    "fastapi[standard]>=0.141.1",
+    "fastapi>=0.115.0",
     "psycopg[binary]>=3.3.4",
-    "uvicorn>=0.52.1",
+    "uvicorn>=0.30.0",
     "pymongo>=4.10.1",
     "motor>=3.6.0",
     "pydantic[email]>=2.13.4",
@@ -22,14 +22,3 @@ dependencies = [
     "bcrypt>=4.0.0",
     "python-multipart>=0.0.9",
 ]
-
-
-[project.scripts]
-quotation-service = "quotation_service:main"
-
-[build-system]
-requires = ["uv_build>=0.12.1,<0.13.0"]
-build-backend = "uv_build"
-
-[tool.vercel]
-entrypoint = "src.quotation_service.main:app"

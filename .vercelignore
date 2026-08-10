@@ -5,6 +5,5 @@ __pycache__
 .git
 .python-version
 uv.lock
-README.md
 .gitignore
 alembic/
