@@ -18,18 +18,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize database schema for PostgreSQL/SQLite
-if DB_TYPE in (DatabaseType.POSTGRESQL, DatabaseType.SQLITE):
-    from .database import Base, engine
+@app.on_event("startup")
+def startup_event():
+    """Initialize database schema on startup"""
+    if DB_TYPE in (DatabaseType.POSTGRESQL, DatabaseType.SQLITE):
+        from .database import Base, engine
 
-    if engine:
-        Base.metadata.create_all(bind=engine)
+        if engine:
+            Base.metadata.create_all(bind=engine)
 
 
 @app.on_event("shutdown")
 def shutdown_event():
     """Close database connections on shutdown"""
-    close_connections()
+    try:
+        close_connections()
+    except Exception:
+        pass
 
 
 @app.get("/")
