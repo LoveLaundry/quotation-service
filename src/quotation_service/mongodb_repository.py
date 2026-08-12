@@ -64,6 +64,17 @@ class MongoDBQuotationRepository(QuotationRepository):
         except Exception:
             return None
 
+    def get_by_tag(self, tag: str) -> List[Dict[str, Any]]:
+        """Get quotations filtered by tag"""
+        documents = self.collection.find({"tag": tag}).sort("created_at", -1)
+        results = []
+        for doc in documents:
+            try:
+                results.append(self._serialize_document(doc))
+            except ValueError:
+                pass
+        return results
+
     def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new quotation"""
         now = datetime.utcnow()
@@ -73,6 +84,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             "quotation_title": quotation_data.get("quotation_title"),
             "line_items": quotation_data.get("line_items", []),
             "status": quotation_data.get("status", "draft"),
+            "tag": quotation_data.get("tag", "shop"),
             "created_at": now,
             "updated_at": now,
         }

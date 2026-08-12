@@ -51,8 +51,25 @@ def root():
     response_model=list[QuotationResponse],
     dependencies=[Depends(require_role(["ADMIN", "MANAGER", "STAFF"]))],
 )
-def get_all_quotations(repo: QuotationRepository = Depends(get_repository)):
-    quotations = repo.get_all()
+def get_all_quotations(
+    tag: str | None = None,
+    repo: QuotationRepository = Depends(get_repository)
+):
+    """Get all quotations with optional tag filtering"""
+    if tag:
+        quotations = repo.get_by_tag(tag)
+    else:
+        quotations = repo.get_all()
+    return quotations
+
+
+@app.get(
+    "/quotations/guest/shop",
+    response_model=list[QuotationResponse],
+)
+def get_shop_quotations_guest(repo: QuotationRepository = Depends(get_repository)):
+    """Public endpoint for guest users to view shop quotations only"""
+    quotations = repo.get_by_tag("shop")
     return quotations
 
 
@@ -94,6 +111,7 @@ def create_quotation(
         "quotation_title": payload.quotation_title,
         "line_items": line_items_data,
         "status": payload.status,
+        "tag": payload.tag,
     }
 
     new_quotation = repo.create(quotation_data)

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Union
+from typing import Union, Literal
 from pydantic import BaseModel, Field, field_serializer
 
 
@@ -15,6 +15,7 @@ class QuotationCreate(BaseModel):
     quotation_title: str | None = None
     line_items: list[LineItemSchema] = Field(default_factory=list)
     status: str = "draft"
+    tag: Literal["shop", "hotel"] = "shop"  # Tag for filtering quotations
 
 
 class QuotationUpdate(BaseModel):
@@ -22,6 +23,7 @@ class QuotationUpdate(BaseModel):
     quotation_title: str | None = None
     line_items: list[LineItemSchema] | None = None
     status: str | None = None
+    tag: Literal["shop", "hotel"] | None = None
 
 
 class QuotationResponse(BaseModel):
@@ -30,6 +32,7 @@ class QuotationResponse(BaseModel):
     quotation_title: str | None
     line_items: list[dict]
     status: str
+    tag: str = "shop"
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

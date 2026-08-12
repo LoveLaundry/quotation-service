@@ -19,6 +19,7 @@ class PostgreSQLQuotationRepository(QuotationRepository):
             "quotation_title": quotation.quotation_title,
             "line_items": quotation.line_items,
             "status": quotation.status,
+            "tag": quotation.tag,
             "created_at": quotation.created_at,
             "updated_at": quotation.updated_at,
         }
@@ -33,6 +34,11 @@ class PostgreSQLQuotationRepository(QuotationRepository):
         quotation = self.db.query(Quotation).filter(Quotation.id == quotation_id).first()
         return self._model_to_dict(quotation) if quotation else None
     
+    def get_by_tag(self, tag: str) -> List[Dict[str, Any]]:
+        """Get quotations filtered by tag"""
+        quotations = self.db.query(Quotation).filter(Quotation.tag == tag).order_by(Quotation.created_at.desc()).all()
+        return [self._model_to_dict(q) for q in quotations]
+    
     def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new quotation"""
         new_quotation = Quotation(
@@ -40,6 +46,7 @@ class PostgreSQLQuotationRepository(QuotationRepository):
             quotation_title=quotation_data.get("quotation_title"),
             line_items=quotation_data.get("line_items", []),
             status=quotation_data.get("status", "draft"),
+            tag=quotation_data.get("tag", "shop"),
         )
         
         self.db.add(new_quotation)

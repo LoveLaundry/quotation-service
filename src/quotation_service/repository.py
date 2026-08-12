@@ -16,6 +16,11 @@ class QuotationRepository(ABC):
         pass
     
     @abstractmethod
+    def get_by_tag(self, tag: str) -> List[Dict[str, Any]]:
+        """Get quotations filtered by tag"""
+        pass
+    
+    @abstractmethod
     def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new quotation"""
         pass
