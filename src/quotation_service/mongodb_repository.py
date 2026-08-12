@@ -1,11 +1,13 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from pymongo import MongoClient
 from bson import ObjectId
 
 from .repository import QuotationRepository
-from .config import DATABASE_URL, MONGODB_DB_NAME, MONGODB_COLLECTION
+from .config import MONGODB_COLLECTION
 from .crypto_helper import encrypt_dict, decrypt_dict, get_search_token
+from .database.main_db import quotations_collection
+from .repositories.main_repository import bump_version, enqueue_sync
+from .services.verification_service import attach_verification_to
 
 SENSITIVE_FIELDS = ["client_name", "quotation_title", "line_items"]
 
@@ -14,9 +16,7 @@ class MongoDBQuotationRepository(QuotationRepository):
     """MongoDB implementation of QuotationRepository with envelope encryption"""
 
     def __init__(self):
-        self.client = MongoClient(DATABASE_URL)
-        self.db = self.client[MONGODB_DB_NAME]
-        self.collection = self.db[MONGODB_COLLECTION]
+        self.collection = quotations_collection
 
         # Create indexes
         self.collection.create_index("client_name_search")
@@ -51,7 +51,8 @@ class MongoDBQuotationRepository(QuotationRepository):
         results = []
         for doc in documents:
             try:
-                results.append(self._serialize_document(doc))
+                serialized = self._serialize_document(doc)
+                results.append(attach_verification_to("quotation", doc["_id"], serialized))
             except ValueError:
                 pass
         return results
@@ -60,7 +61,10 @@ class MongoDBQuotationRepository(QuotationRepository):
         """Get a quotation by ID"""
         try:
             doc = self.collection.find_one({"_id": ObjectId(quotation_id)})
-            return self._serialize_document(doc) if doc else None
+            if not doc:
+                return None
+            serialized = self._serialize_document(doc)
+            return attach_verification_to("quotation", doc["_id"], serialized)
         except Exception:
             return None
 
@@ -70,7 +74,8 @@ class MongoDBQuotationRepository(QuotationRepository):
         results = []
         for doc in documents:
             try:
-                results.append(self._serialize_document(doc))
+                serialized = self._serialize_document(doc)
+                results.append(attach_verification_to("quotation", doc["_id"], serialized))
             except ValueError:
                 pass
         return results
@@ -95,7 +100,12 @@ class MongoDBQuotationRepository(QuotationRepository):
         result = self.collection.insert_one(encrypted_document)
         encrypted_document["_id"] = result.inserted_id
 
-        return self._serialize_document(encrypted_document)
+        # Main DB write succeeded -> bump version and enqueue replication
+        new_version = bump_version("quotation", result.inserted_id)
+        enqueue_sync("quotation", result.inserted_id, new_version)
+
+        serialized = self._serialize_document(encrypted_document)
+        return attach_verification_to("quotation", result.inserted_id, serialized)
 
     def update(
         self, quotation_id: str, update_data: Dict[str, Any]
@@ -126,7 +136,15 @@ class MongoDBQuotationRepository(QuotationRepository):
                 return_document=True,
             )
 
-            return self._serialize_document(result) if result else None
+            if not result:
+                return None
+
+            # Main DB write succeeded -> bump version and enqueue replication
+            new_version = bump_version("quotation", ObjectId(quotation_id))
+            enqueue_sync("quotation", ObjectId(quotation_id), new_version)
+
+            serialized = self._serialize_document(result)
+            return attach_verification_to("quotation", ObjectId(quotation_id), serialized)
         except Exception:
             return None
 
@@ -140,5 +158,4 @@ class MongoDBQuotationRepository(QuotationRepository):
 
     def close(self):
         """Close the MongoDB connection"""
-        if self.client:
-            self.client.close()
+        pass

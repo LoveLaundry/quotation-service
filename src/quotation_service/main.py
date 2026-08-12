@@ -7,6 +7,10 @@ from .repository import QuotationRepository
 from .repository_factory import get_repository, close_connections
 from .schemas import QuotationCreate, QuotationUpdate, QuotationResponse
 from .auth_helper import get_current_user, require_role
+from .database.main_db import ensure_indexes
+from .database.connection_manager import close_all
+from .routers.admin_database import router as admin_database_router
+from .services import synchronization_service
 
 app = FastAPI(title="Quotation Service", version="1.0.0")
 
@@ -18,6 +22,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(admin_database_router)
+
+
 @app.on_event("startup")
 def startup_event():
     """Initialize database schema on startup"""
@@ -26,13 +33,24 @@ def startup_event():
 
         if engine:
             Base.metadata.create_all(bind=engine)
+    else:
+        ensure_indexes()
+        synchronization_service.start_worker()
 
 
 @app.on_event("shutdown")
 def shutdown_event():
     """Close database connections on shutdown"""
     try:
+        synchronization_service.stop_worker()
+    except Exception:
+        pass
+    try:
         close_connections()
+    except Exception:
+        pass
+    try:
+        close_all()
     except Exception:
         pass
 
