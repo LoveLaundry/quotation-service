@@ -34,12 +34,14 @@ def detect_database_type(database_url: str) -> DatabaseType:
         raise ValueError(f"Unsupported database URL format: {database_url}")
 
 
-# Load configuration
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Load configuration. Prefer DATABASE_URL; fall back to MONGODB_MAIN_URI for Vercel.
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MONGODB_MAIN_URI") or ""
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is required")
-
-DB_TYPE = detect_database_type(DATABASE_URL)
+    # Avoid hard-crashing the serverless import; health/routes will fail clearly later.
+    DATABASE_URL = "mongodb://127.0.0.1:27017"
+    DB_TYPE = DatabaseType.MONGODB
+else:
+    DB_TYPE = detect_database_type(DATABASE_URL)
 
 # MongoDB specific configuration
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "quotations_db")
@@ -73,7 +75,7 @@ def resolve_main_db() -> str:
 
 
 def resolve_secondary_uri() -> str:
-    return MONGODB_SECONDARY_URI or DATABASE_URL
+    return MONGODB_SECONDARY_URI or "mongodb://unconfigured"
 
 
 def resolve_secondary_db() -> str:
@@ -81,7 +83,7 @@ def resolve_secondary_db() -> str:
 
 
 def resolve_local_uri() -> str:
-    return MONGODB_LOCAL_URI or DATABASE_URL
+    return MONGODB_LOCAL_URI or "mongodb://unconfigured"
 
 
 def resolve_local_db() -> str:
