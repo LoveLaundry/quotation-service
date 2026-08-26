@@ -18,6 +18,9 @@ sync_status_collection: Collection = _db.get_collection("sync_status")
 sync_queue_collection: Collection = _db.get_collection("sync_queue")
 sync_logs_collection: Collection = _db.get_collection("sync_logs")
 
+# Public chatbot conversations (guest <-> bot/admin).
+chat_collection: Collection = _db.get_collection("chat_conversations")
+
 
 def ensure_indexes():
     """Create all required indexes on the MAIN database."""
@@ -31,3 +34,7 @@ def ensure_indexes():
     sync_queue_collection.create_index([("status", 1), ("next_attempt_at", 1)])
     sync_queue_collection.create_index([("entity", 1), ("record_id", 1)], unique=True)
     sync_logs_collection.create_index([("operation", 1), ("started_at", -1)])
+
+    # Chat conversations indexes
+    chat_collection.create_index([("updated_at", -1)])
+    chat_collection.create_index("guest_id")

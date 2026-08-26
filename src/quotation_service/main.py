@@ -11,6 +11,7 @@ from .auth_helper import get_current_user, require_role
 from .database.main_db import ensure_indexes
 from .database.connection_manager import close_all
 from .routers.admin_database import router as admin_database_router
+from .routers.chat import router as chat_router
 from .services import synchronization_service
 
 
@@ -80,6 +81,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 app.include_router(admin_database_router)
+app.include_router(chat_router)
 
 
 @app.on_event("startup")
