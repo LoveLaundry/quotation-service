@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from typing import Union
 
 from .config import DB_TYPE, DatabaseType
@@ -21,22 +22,32 @@ import sentry_sdk
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# CORS configuration - allow all origins for now to avoid blocking
+# Known production frontend origins. Used as a safe default so the API is never
+# wide-open ("*") yet never fully locked down (which would break the live app if
+# the ALLOWED_ORIGINS env var is not injected by the platform).
+DEFAULT_ALLOWED_ORIGINS = [
+    "https://lovelaundry-manager.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+
+# CORS configuration - prefer the platform-provided allowlist; otherwise use the
+# known-good production origins. Never fall back to "*".
 try:
     ALLOWED_ORIGINS_ENV = os.getenv("ALLOWED_ORIGINS", "")
     if ALLOWED_ORIGINS_ENV:
         ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS_ENV.split(",") if origin.strip()]
         ALLOW_CREDENTIALS = True
     else:
-        # If not configured, allow all origins (development/production fallback)
-        ALLOWED_ORIGINS = ["*"]
-        ALLOW_CREDENTIALS = False
+        # If not configured, use the known production origins (never "*").
+        ALLOWED_ORIGINS = list(DEFAULT_ALLOWED_ORIGINS)
+        ALLOW_CREDENTIALS = True
 
     logger.info(f"CORS configured with origins: {ALLOWED_ORIGINS}, credentials: {ALLOW_CREDENTIALS}")
 except Exception as e:
-    logger.warning(f"CORS configuration failed, using defaults: {e}")
-    ALLOWED_ORIGINS = ["*"]
-    ALLOW_CREDENTIALS = False
+    logger.warning(f"CORS configuration failed, using safe default: {e}")
+    ALLOWED_ORIGINS = list(DEFAULT_ALLOWED_ORIGINS)
+    ALLOW_CREDENTIALS = True
 
 ON_VERCEL = os.getenv("VERCEL") == "1"
 
@@ -44,7 +55,7 @@ SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
-        traces_sample_rate=1.0,
+        traces_sample_rate=0.1,
     )
 
 app = FastAPI(title="Quotation Service", version="1.0.0")
@@ -56,6 +67,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled exception", exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
 
 app.include_router(admin_database_router)
 
