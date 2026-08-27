@@ -20,6 +20,7 @@ sync_logs_collection: Collection = _db.get_collection("sync_logs")
 
 # Public chatbot conversations (guest <-> bot/admin).
 chat_collection: Collection = _db.get_collection("chat_conversations")
+chat_messages_collection: Collection = _db.get_collection("chat_messages")
 
 
 def ensure_indexes():
@@ -38,3 +39,4 @@ def ensure_indexes():
     # Chat conversations indexes
     chat_collection.create_index([("updated_at", -1)])
     chat_collection.create_index("guest_id")
+    chat_messages_collection.create_index([("conversation_id", 1), ("timestamp", 1)])

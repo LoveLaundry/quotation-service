@@ -1,12 +1,16 @@
 """
-Public chatbot conversations.
+Public chatbot conversations (encrypted at rest).
 
+- Every message's `text` and the conversation `guest_name` are envelope-encrypted
+  with MASTER_KEY (same scheme as bills/gatepasses) via crypto_helper.
+- Messages live in `chat_messages` so they can be appended individually; the
+  conversation metadata (with the encrypted guest_name) lives in
+  `chat_conversations`.
 - Guests (public.lovelaundry.lk) post messages; the service stores them and,
   unless an admin has taken over, asks lovelaundry-bot for a reply.
-- Admins (quotation-ui) can list every conversation, read the full history,
-  take over a conversation (which suppresses the bot), and reply as themselves.
-- The public widget polls its conversation to learn who it is talking to
-  (bot vs a named admin).
+- Admins (quotation-ui) can list every conversation, read the full (decrypted)
+  history, take over a conversation (which suppresses the bot), and reply as
+  themselves.
 """
 import json
 import os
@@ -20,7 +24,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from ..auth_helper import get_current_user, require_role
-from ..database.main_db import chat_collection
+from ..crypto_helper import decrypt_dict, encrypt_dict
+from ..database.main_db import chat_collection, chat_messages_collection
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -31,6 +36,9 @@ BOT_API_KEY = os.getenv("CHAT_API_KEY")
 # Fallback when the bot is unreachable / unconfigured.
 BOT_FALLBACK = "Thank you for your message. Our team will get back to you shortly."
 
+SENSITIVE_CONV = ["guest_name"]
+SENSITIVE_MSG = ["text"]
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -39,11 +47,92 @@ def _now() -> datetime:
 def _new_message(sender: str, text: str, sender_name: Optional[str] = None) -> dict:
     return {
         "id": str(uuid.uuid4()),
+        "conversation_id": None,  # set by the caller
         "sender": sender,  # guest | bot | admin
-        "text": text,
         "sender_name": sender_name,
-        "timestamp": _now().isoformat(),
+        "text": text,
+        "timestamp": _now(),
     }
+
+
+def _insert_message(conversation_id: str, msg: dict) -> None:
+    doc = encrypt_dict(
+        {
+            "id": msg["id"],
+            "conversation_id": conversation_id,
+            "sender": msg["sender"],
+            "sender_name": msg["sender_name"],
+            "text": msg["text"],
+            "timestamp": msg["timestamp"],
+        },
+        SENSITIVE_MSG,
+    )
+    chat_messages_collection.insert_one(doc)
+
+
+def _decrypt_message(raw: dict) -> dict:
+    d = decrypt_dict(raw, SENSITIVE_MSG)
+    d.pop("encryption_metadata", None)
+    d.pop("_id", None)
+    ts = d.get("timestamp")
+    return {
+        "id": d.get("id"),
+        "conversation_id": d.get("conversation_id"),
+        "sender": d.get("sender"),
+        "sender_name": d.get("sender_name"),
+        "text": d.get("text"),
+        "timestamp": ts.isoformat() if isinstance(ts, datetime) else ts,
+    }
+
+
+def _get_conversation_raw(conversation_id: str) -> Optional[dict]:
+    return chat_collection.find_one({"_id": conversation_id})
+
+
+def _decrypt_conversation(raw: dict) -> dict:
+    conv_id = raw["_id"]
+    d = decrypt_dict(raw, SENSITIVE_CONV)
+    d.pop("encryption_metadata", None)
+    d.pop("_id", None)
+    return {
+        "conversation_id": conv_id,
+        "guest_id": d.get("guest_id"),
+        "guest_name": d.get("guest_name"),
+        "assigned_admin_name": d.get("assigned_admin_name"),
+        "status": d.get("status", "open"),
+        "created_at": d.get("created_at"),
+        "updated_at": d.get("updated_at"),
+    }
+
+
+def _get_or_create(conversation_id: str, guest_id: str, guest_name: Optional[str]) -> dict:
+    raw = _get_conversation_raw(conversation_id)
+    if raw:
+        return raw
+    now = _now()
+    conv = encrypt_dict(
+        {
+            "_id": conversation_id,
+            "guest_id": guest_id,
+            "guest_name": guest_name,
+            "assigned_admin_name": None,
+            "status": "open",
+            "created_at": now,
+            "updated_at": now,
+        },
+        SENSITIVE_CONV,
+    )
+    chat_collection.insert_one(conv)
+    return conv
+
+
+def _messages_for(conversation_id: str) -> list:
+    return [
+        _decrypt_message(r)
+        for r in chat_messages_collection.find({"conversation_id": conversation_id}).sort(
+            "timestamp", 1
+        )
+    ]
 
 
 def _call_bot(message: str, lang: str = "en") -> str:
@@ -66,38 +155,6 @@ def _call_bot(message: str, lang: str = "en") -> str:
         return BOT_FALLBACK
 
 
-def _serialize(doc: dict) -> dict:
-    return {
-        "conversation_id": doc["_id"],
-        "guest_id": doc.get("guest_id"),
-        "guest_name": doc.get("guest_name"),
-        "assigned_admin_name": doc.get("assigned_admin_name"),
-        "status": doc.get("status", "open"),
-        "messages": doc.get("messages", []),
-        "created_at": doc.get("created_at"),
-        "updated_at": doc.get("updated_at"),
-    }
-
-
-def _get_or_create(conversation_id: str, guest_id: str, guest_name: Optional[str]) -> dict:
-    doc = chat_collection.find_one({"_id": conversation_id})
-    if doc:
-        return doc
-    now = _now()
-    doc = {
-        "_id": conversation_id,
-        "guest_id": guest_id,
-        "guest_name": guest_name,
-        "assigned_admin_name": None,
-        "status": "open",
-        "messages": [],
-        "created_at": now,
-        "updated_at": now,
-    }
-    chat_collection.insert_one(doc)
-    return doc
-
-
 # ── Public endpoints (no auth) ───────────────────────────────────────────────
 class GuestMessageIn(BaseModel):
     message: str
@@ -109,29 +166,25 @@ class GuestMessageIn(BaseModel):
 @router.post("/conversations/{conversation_id}/messages")
 def post_guest_message(conversation_id: str, body: GuestMessageIn):
     """Guest sends a message. Bot replies unless an admin has taken over."""
-    doc = _get_or_create(conversation_id, body.guest_id, body.guest_name)
+    raw = _get_or_create(conversation_id, body.guest_id, body.guest_name)
 
     new_messages = [_new_message("guest", body.message)]
     bot_replied = False
-    if not doc.get("assigned_admin_name"):
+    if not raw.get("assigned_admin_name"):
         reply = _call_bot(body.message, body.lang)
         if reply:
             new_messages.append(_new_message("bot", reply))
             bot_replied = True
 
-    set_fields: dict = {"updated_at": _now()}
-    if body.guest_name and not doc.get("guest_name"):
-        set_fields["guest_name"] = body.guest_name
+    for m in new_messages:
+        _insert_message(conversation_id, m)
 
-    chat_collection.update_one(
-        {"_id": conversation_id},
-        {"$push": {"messages": {"$each": new_messages}}, "$set": set_fields},
-    )
-    updated = chat_collection.find_one({"_id": conversation_id})
+    chat_collection.update_one({"_id": conversation_id}, {"$set": {"updated_at": _now()}})
+
     return {
         "conversation_id": conversation_id,
-        "messages": updated["messages"],
-        "assigned_admin_name": updated.get("assigned_admin_name"),
+        "messages": _messages_for(conversation_id),
+        "assigned_admin_name": raw.get("assigned_admin_name"),
         "bot_replied": bot_replied,
     }
 
@@ -143,14 +196,15 @@ def get_guest_conversation(
 ):
     """Public history poll. Guest uses this to learn new messages and who
     is handling the conversation."""
-    doc = chat_collection.find_one({"_id": conversation_id})
-    if not doc:
+    raw = _get_conversation_raw(conversation_id)
+    if not raw:
         return {
             "conversation_id": conversation_id,
             "messages": [],
             "assigned_admin_name": None,
         }
-    return _serialize(doc)
+    conv = _decrypt_conversation(raw)
+    return {**conv, "messages": _messages_for(conversation_id)}
 
 
 # ── Admin endpoints (ADMIN / MANAGER) ────────────────────────────────────────
@@ -165,23 +219,18 @@ def admin_list_conversations(
     filt: dict = {}
     if status:
         filt["status"] = status
-    docs = list(chat_collection.find(filt).sort("updated_at", -1).limit(limit))
+    raws = list(chat_collection.find(filt).sort("updated_at", -1).limit(limit))
     result = []
-    for d in docs:
-        messages = d.get("messages", [])
-        result.append(
-            {
-                "conversation_id": d["_id"],
-                "guest_id": d.get("guest_id"),
-                "guest_name": d.get("guest_name"),
-                "assigned_admin_name": d.get("assigned_admin_name"),
-                "status": d.get("status", "open"),
-                "message_count": len(messages),
-                "last_message": messages[-1] if messages else None,
-                "created_at": d.get("created_at"),
-                "updated_at": d.get("updated_at"),
-            }
+    for raw in raws:
+        conv = _decrypt_conversation(raw)
+        count = chat_messages_collection.count_documents(
+            {"conversation_id": conv["conversation_id"]}
         )
+        last_raw = chat_messages_collection.find_one(
+            {"conversation_id": conv["conversation_id"]}, sort=[("timestamp", -1)]
+        )
+        last_message = _decrypt_message(last_raw) if last_raw else None
+        result.append({**conv, "message_count": count, "last_message": last_message})
     return result
 
 
@@ -190,10 +239,11 @@ def admin_list_conversations(
     dependencies=[Depends(require_role(["ADMIN", "MANAGER"]))],
 )
 def admin_get_conversation(conversation_id: str):
-    doc = chat_collection.find_one({"_id": conversation_id})
-    if not doc:
+    raw = _get_conversation_raw(conversation_id)
+    if not raw:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return _serialize(doc)
+    conv = _decrypt_conversation(raw)
+    return {**conv, "messages": _messages_for(conversation_id)}
 
 
 class AdminMessageIn(BaseModel):
@@ -209,8 +259,8 @@ def admin_post_message(
     body: AdminMessageIn,
     current_user: dict = Depends(get_current_user),
 ):
-    doc = chat_collection.find_one({"_id": conversation_id})
-    if not doc:
+    raw = _get_conversation_raw(conversation_id)
+    if not raw:
         raise HTTPException(status_code=404, detail="Conversation not found")
     sender_name = (
         current_user.get("user_name")
@@ -218,16 +268,14 @@ def admin_post_message(
         or current_user.get("sub")
         or "Admin"
     )
-    admin_msg = _new_message("admin", body.text, sender_name=sender_name)
+    _insert_message(conversation_id, _new_message("admin", body.text, sender_name))
     chat_collection.update_one(
         {"_id": conversation_id},
-        {
-            "$push": {"messages": admin_msg},
-            "$set": {"assigned_admin_name": sender_name, "updated_at": _now()},
-        },
+        {"$set": {"assigned_admin_name": sender_name, "updated_at": _now()}},
     )
-    updated = chat_collection.find_one({"_id": conversation_id})
-    return _serialize(updated)
+    updated = _get_conversation_raw(conversation_id)
+    conv = _decrypt_conversation(updated)
+    return {**conv, "messages": _messages_for(conversation_id)}
 
 
 class AdminUpdateIn(BaseModel):
@@ -241,18 +289,19 @@ class AdminUpdateIn(BaseModel):
     dependencies=[Depends(require_role(["ADMIN", "MANAGER"]))],
 )
 def admin_update_conversation(conversation_id: str, body: AdminUpdateIn):
-    doc = chat_collection.find_one({"_id": conversation_id})
-    if not doc:
+    raw = _get_conversation_raw(conversation_id)
+    if not raw:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    set_fields: dict = {}
-    if body.status is not None:
-        set_fields["status"] = body.status
+    dec = decrypt_dict(raw, SENSITIVE_CONV)
     if body.guest_name is not None:
-        set_fields["guest_name"] = body.guest_name
+        dec["guest_name"] = body.guest_name
     if body.assigned_admin_name is not None:
-        set_fields["assigned_admin_name"] = body.assigned_admin_name
-    if set_fields:
-        set_fields["updated_at"] = _now()
-    chat_collection.update_one({"_id": conversation_id}, {"$set": set_fields})
-    updated = chat_collection.find_one({"_id": conversation_id})
-    return _serialize(updated)
+        dec["assigned_admin_name"] = body.assigned_admin_name
+    if body.status is not None:
+        dec["status"] = body.status
+    dec["updated_at"] = _now()
+    new_doc = encrypt_dict(dec, SENSITIVE_CONV)
+    chat_collection.replace_one({"_id": conversation_id}, new_doc)
+    updated = _get_conversation_raw(conversation_id)
+    conv = _decrypt_conversation(updated)
+    return {**conv, "messages": _messages_for(conversation_id)}
