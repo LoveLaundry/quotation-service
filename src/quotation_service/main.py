@@ -375,7 +375,6 @@ def advance_quotation_status(
 
 @app.get(
     "/quotations/{quotation_id}/tracking",
-    dependencies=[Depends(require_role(["ADMIN", "MANAGER", "STAFF"]))],
 )
 def track_quotation(
     quotation_id: Union[int, str],
