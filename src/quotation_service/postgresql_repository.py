@@ -1,8 +1,9 @@
 from typing import List, Optional, Dict, Any
+import secrets
 from sqlalchemy.orm import Session
 
 from .repository import QuotationRepository
-from .models import Quotation
+from .models import Quotation, GarmentTag
 
 
 class PostgreSQLQuotationRepository(QuotationRepository):
@@ -19,6 +20,7 @@ class PostgreSQLQuotationRepository(QuotationRepository):
             "quotation_title": quotation.quotation_title,
             "line_items": quotation.line_items,
             "status": quotation.status,
+            "status_history": quotation.status_history or [],
             "tag": quotation.tag,
             "created_at": quotation.created_at,
             "updated_at": quotation.updated_at,
@@ -46,6 +48,7 @@ class PostgreSQLQuotationRepository(QuotationRepository):
             quotation_title=quotation_data.get("quotation_title"),
             line_items=quotation_data.get("line_items", []),
             status=quotation_data.get("status", "draft"),
+            status_history=quotation_data.get("status_history", []),
             tag=quotation_data.get("tag", "shop"),
         )
         
@@ -80,3 +83,68 @@ class PostgreSQLQuotationRepository(QuotationRepository):
         self.db.commit()
         
         return True
+
+    # ─── Garment tags ──────────────────────────────────────────────────────────
+    def _tag_to_dict(self, tag: GarmentTag) -> Dict[str, Any]:
+        return {
+            "id": tag.id,
+            "code": tag.code,
+            "quotation_id": tag.quotation_id,
+            "line_item_id": tag.line_item_id,
+            "label": tag.label,
+            "created_at": tag.created_at,
+        }
+
+    def _gen_tag_code(self) -> str:
+        while True:
+            code = secrets.token_urlsafe(6)
+            if self.db.query(GarmentTag).filter(GarmentTag.code == code).first() is None:
+                return code
+
+    def create_tags(
+        self,
+        quotation_id: int,
+        count: int,
+        per_item: bool,
+        label: Optional[str],
+    ) -> Optional[List[Dict[str, Any]]]:
+        q = self.get_by_id(quotation_id)
+        if not q:
+            return None
+        items = q.get("line_items") or []
+        specs: List[tuple] = []
+        if per_item and items:
+            for it in items:
+                specs.append(
+                    (str(it["id"]) if it.get("id") is not None else None, it.get("item_name"))
+                )
+        else:
+            for _ in range(max(1, int(count or 1))):
+                specs.append((None, label))
+        created: List[Dict[str, Any]] = []
+        for lid, lab in specs:
+            code = self._gen_tag_code()
+            tag = GarmentTag(
+                code=code,
+                quotation_id=int(quotation_id),
+                line_item_id=lid,
+                label=lab,
+            )
+            self.db.add(tag)
+            self.db.commit()
+            self.db.refresh(tag)
+            created.append(self._tag_to_dict(tag))
+        return created
+
+    def list_tags(self, quotation_id: int) -> List[Dict[str, Any]]:
+        tags = (
+            self.db.query(GarmentTag)
+            .filter(GarmentTag.quotation_id == int(quotation_id))
+            .order_by(GarmentTag.created_at.asc())
+            .all()
+        )
+        return [self._tag_to_dict(t) for t in tags]
+
+    def get_tag(self, code: str) -> Optional[Dict[str, Any]]:
+        tag = self.db.query(GarmentTag).filter(GarmentTag.code == code).first()
+        return self._tag_to_dict(tag) if tag else None

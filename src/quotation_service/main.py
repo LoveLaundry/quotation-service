@@ -2,11 +2,23 @@ from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Union
+from datetime import datetime
+from sqlalchemy import text
 
 from .config import DB_TYPE, DatabaseType
 from .repository import QuotationRepository
 from .repository_factory import get_repository, close_connections
-from .schemas import QuotationCreate, QuotationUpdate, QuotationResponse
+from .schemas import (
+    QuotationCreate,
+    QuotationUpdate,
+    QuotationResponse,
+    QuotationAdvanceStatus,
+    TagCreate,
+    TagOut,
+    TagsResponse,
+    ORDER_STATUSES,
+    ORDER_STATUS_TRANSITIONS,
+)
 from .auth_helper import get_current_user, require_role
 from .database.main_db import ensure_indexes
 from .database.connection_manager import close_all
@@ -56,6 +68,18 @@ except Exception as e:
 
 ON_VERCEL = os.getenv("VERCEL") == "1"
 
+# Public storefront used to build scannable tag/tracking URLs.
+PUBLIC_BASE = (os.getenv("PUBLIC_BASE", "https://public.lovelaundry.lk")).rstrip("/")
+
+
+def _norm_qid(quotation_id: Union[int, str]) -> Union[int, str]:
+    """Coerce a path id to the type expected by the active repository."""
+    return str(quotation_id) if DB_TYPE == DatabaseType.MONGODB else int(quotation_id)
+
+
+def _tracking_url(code: str) -> str:
+    return f"{PUBLIC_BASE}/track?tag={code}"
+
 SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:
     sentry_sdk.init(
@@ -93,10 +117,40 @@ def startup_event():
 
             if engine:
                 Base.metadata.create_all(bind=engine)
+            _migrate_quotation_schema()
         else:
             ensure_indexes()
     except Exception:
         logger.exception("Failed to initialize database schema on startup")
+
+
+def _migrate_quotation_schema():
+    """Add status_history to existing quotation tables (create_all won't alter)."""
+    if DB_TYPE not in (DatabaseType.POSTGRESQL, DatabaseType.SQLITE):
+        return
+    try:
+        from .database import engine
+
+        if engine is None:
+            return
+        with engine.begin() as conn:
+            if DB_TYPE == DatabaseType.POSTGRESQL:
+                conn.execute(
+                    text(
+                        "ALTER TABLE quotations ADD COLUMN IF NOT EXISTS "
+                        "status_history JSON NOT NULL DEFAULT '[]'::json"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        "ALTER TABLE quotations ADD COLUMN IF NOT EXISTS "
+                        "status_history JSON NOT NULL DEFAULT '[]'"
+                    )
+                )
+        logger.info("Quotation schema migration check completed")
+    except Exception:
+        logger.exception("Quotation schema migration failed")
 
     if not ON_VERCEL:
         try:
@@ -196,11 +250,26 @@ def create_quotation(
 ):
     line_items_data = [item.model_dump() for item in payload.line_items]
 
+    username = current_user.get("username") or current_user.get("sub")
+    if payload.status not in ORDER_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Status must be one of {ORDER_STATUSES}",
+        )
+
     quotation_data = {
         "client_name": payload.client_name,
         "quotation_title": payload.quotation_title,
         "line_items": line_items_data,
         "status": payload.status,
+        "status_history": [
+            {
+                "status": payload.status,
+                "changed_at": datetime.utcnow().isoformat() + "Z",
+                "changed_by": username,
+                "note": "Created",
+            }
+        ],
         "tag": payload.tag,
     }
 
@@ -220,12 +289,17 @@ def update_quotation(
     quotation_id: Union[int, str],
     payload: QuotationUpdate,
     repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
 ):
     # Convert quotation_id based on database type
     if DB_TYPE == DatabaseType.MONGODB:
         quotation_id = str(quotation_id)
     else:
         quotation_id = int(quotation_id)
+
+    current = repo.get_by_id(quotation_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Quotation not found")
 
     update_data = payload.model_dump(exclude_unset=True)
 
@@ -235,12 +309,111 @@ def update_quotation(
             for item in update_data["line_items"]
         ]
 
+    # Record a status transition in history when the status actually changes.
+    if "status" in update_data and update_data["status"] is not None:
+        if update_data["status"] not in ORDER_STATUSES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Status must be one of {ORDER_STATUSES}",
+            )
+        if update_data["status"] != current.get("status"):
+            hist = list(current.get("status_history") or [])
+            hist.append(
+                {
+                    "status": update_data["status"],
+                    "changed_at": datetime.utcnow().isoformat() + "Z",
+                    "changed_by": current_user.get("username") or current_user.get("sub"),
+                    "note": "Status updated",
+                }
+            )
+            update_data["status_history"] = hist
+
     updated_quotation = repo.update(quotation_id, update_data)
 
     if not updated_quotation:
         raise HTTPException(status_code=404, detail="Quotation not found")
 
     return updated_quotation
+
+
+@app.post(
+    "/quotations/{quotation_id}/status",
+    response_model=QuotationResponse,
+    dependencies=[Depends(require_role(["ADMIN", "MANAGER", "STAFF"]))],
+)
+def advance_quotation_status(
+    quotation_id: Union[int, str],
+    payload: QuotationAdvanceStatus,
+    repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
+):
+    """Advance an order through its lifecycle, recording the transition."""
+    if payload.status not in ORDER_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Status must be one of {ORDER_STATUSES}",
+        )
+
+    if DB_TYPE == DatabaseType.MONGODB:
+        qid = str(quotation_id)
+    else:
+        qid = int(quotation_id)
+
+    current = repo.get_by_id(qid)
+    if not current:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+
+    current_status = current.get("status")
+    allowed = ORDER_STATUS_TRANSITIONS.get(current_status, [])
+    if payload.status != current_status and payload.status not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot move from '{current_status}' to '{payload.status}'. "
+            f"Allowed next: {allowed or ['none (terminal)']}",
+        )
+
+    hist = list(current.get("status_history") or [])
+    hist.append(
+        {
+            "status": payload.status,
+            "changed_at": datetime.utcnow().isoformat() + "Z",
+            "changed_by": current_user.get("username") or current_user.get("sub"),
+            "note": payload.note,
+        }
+    )
+
+    updated = repo.update(qid, {"status": payload.status, "status_history": hist})
+    if not updated:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+    return updated
+
+
+@app.get(
+    "/quotations/{quotation_id}/tracking",
+)
+def track_quotation(
+    quotation_id: Union[int, str],
+    repo: QuotationRepository = Depends(get_repository),
+):
+    """Customer/operator-facing order timeline (status + history, no PII)."""
+    if DB_TYPE == DatabaseType.MONGODB:
+        qid = str(quotation_id)
+    else:
+        qid = int(quotation_id)
+
+    current = repo.get_by_id(qid)
+    if not current:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+
+    return {
+        "id": current.get("id"),
+        "quotation_title": current.get("quotation_title"),
+        "tag": current.get("tag"),
+        "status": current.get("status"),
+        "status_history": current.get("status_history") or [],
+        "created_at": current.get("created_at"),
+        "updated_at": current.get("updated_at"),
+    }
 
 
 @app.delete(
@@ -263,3 +436,110 @@ def delete_quotation(
         raise HTTPException(status_code=404, detail="Quotation not found")
 
     return {"message": "Quotation deleted successfully"}
+
+
+# ─── Garment tags (QR) ──────────────────────────────────────────────────────────
+@app.post(
+    "/quotations/{quotation_id}/tags",
+    response_model=TagsResponse,
+    dependencies=[Depends(require_role(["ADMIN", "MANAGER"]))],
+)
+def create_quotation_tags(
+    quotation_id: Union[int, str],
+    payload: TagCreate,
+    repo: QuotationRepository = Depends(get_repository),
+):
+    """Mint QR garment tags for an order (one per line item or N loose tags)."""
+    qid = _norm_qid(quotation_id)
+    tags = repo.create_tags(qid, payload.count, payload.per_item, payload.label)
+    if tags is None:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+    return TagsResponse(
+        quotation_id=qid,
+        tags=[
+            TagOut(
+                id=t["id"],
+                code=t["code"],
+                quotation_id=t["quotation_id"],
+                line_item_id=t.get("line_item_id"),
+                label=t.get("label"),
+                created_at=t.get("created_at"),
+                tracking_url=_tracking_url(t["code"]),
+            )
+            for t in tags
+        ],
+    )
+
+
+@app.get(
+    "/quotations/{quotation_id}/tags",
+    response_model=TagsResponse,
+    dependencies=[Depends(require_role(["ADMIN", "MANAGER", "STAFF"]))],
+)
+def list_quotation_tags(
+    quotation_id: Union[int, str],
+    repo: QuotationRepository = Depends(get_repository),
+):
+    qid = _norm_qid(quotation_id)
+    tags = repo.list_tags(qid)
+    return TagsResponse(
+        quotation_id=qid,
+        tags=[
+            TagOut(
+                id=t["id"],
+                code=t["code"],
+                quotation_id=t["quotation_id"],
+                line_item_id=t.get("line_item_id"),
+                label=t.get("label"),
+                created_at=t.get("created_at"),
+                tracking_url=_tracking_url(t["code"]),
+            )
+            for t in tags
+        ],
+    )
+
+
+@app.get("/tags/{code}")
+def lookup_tag(code: str, repo: QuotationRepository = Depends(get_repository)):
+    """Public: resolve a scanned tag to its order status (no PII beyond first name)."""
+    tag = repo.get_tag(code)
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    qid = tag["quotation_id"]
+    q = repo.get_by_id(qid)
+    if not q:
+        raise HTTPException(status_code=404, detail="Order not found")
+    client = q.get("client_name") or ""
+    first_name = client.split()[0] if client else ""
+    return {
+        "code": tag["code"],
+        "quotation_id": qid,
+        "label": tag.get("label"),
+        "client_first_name": first_name,
+        "quotation_title": q.get("quotation_title"),
+        "status": q.get("status"),
+        "status_history": q.get("status_history") or [],
+        "tracking_url": _tracking_url(code),
+    }
+
+
+@app.get("/tags/{code}/tracking")
+def tag_tracking(code: str, repo: QuotationRepository = Depends(get_repository)):
+    """Public: order timeline for a scanned tag (same shape as /tracking)."""
+    tag = repo.get_tag(code)
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    qid = tag["quotation_id"]
+    q = repo.get_by_id(qid)
+    if not q:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {
+        "id": q.get("id"),
+        "quotation_title": q.get("quotation_title"),
+        "tag": q.get("tag"),
+        "status": q.get("status"),
+        "status_history": q.get("status_history") or [],
+        "created_at": q.get("created_at"),
+        "updated_at": q.get("updated_at"),
+        "garment_label": tag.get("label"),
+    }
