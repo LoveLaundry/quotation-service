@@ -2,11 +2,20 @@ from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import Union
+from datetime import datetime
+from sqlalchemy import text
 
 from .config import DB_TYPE, DatabaseType
 from .repository import QuotationRepository
 from .repository_factory import get_repository, close_connections
-from .schemas import QuotationCreate, QuotationUpdate, QuotationResponse
+from .schemas import (
+    QuotationCreate,
+    QuotationUpdate,
+    QuotationResponse,
+    QuotationAdvanceStatus,
+    ORDER_STATUSES,
+    ORDER_STATUS_TRANSITIONS,
+)
 from .auth_helper import get_current_user, require_role
 from .database.main_db import ensure_indexes
 from .database.connection_manager import close_all
@@ -93,10 +102,40 @@ def startup_event():
 
             if engine:
                 Base.metadata.create_all(bind=engine)
+            _migrate_quotation_schema()
         else:
             ensure_indexes()
     except Exception:
         logger.exception("Failed to initialize database schema on startup")
+
+
+def _migrate_quotation_schema():
+    """Add status_history to existing quotation tables (create_all won't alter)."""
+    if DB_TYPE not in (DatabaseType.POSTGRESQL, DatabaseType.SQLITE):
+        return
+    try:
+        from .database import engine
+
+        if engine is None:
+            return
+        with engine.begin() as conn:
+            if DB_TYPE == DatabaseType.POSTGRESQL:
+                conn.execute(
+                    text(
+                        "ALTER TABLE quotations ADD COLUMN IF NOT EXISTS "
+                        "status_history JSON NOT NULL DEFAULT '[]'::json"
+                    )
+                )
+            else:
+                conn.execute(
+                    text(
+                        "ALTER TABLE quotations ADD COLUMN IF NOT EXISTS "
+                        "status_history JSON NOT NULL DEFAULT '[]'"
+                    )
+                )
+        logger.info("Quotation schema migration check completed")
+    except Exception:
+        logger.exception("Quotation schema migration failed")
 
     if not ON_VERCEL:
         try:
@@ -196,11 +235,26 @@ def create_quotation(
 ):
     line_items_data = [item.model_dump() for item in payload.line_items]
 
+    username = current_user.get("username") or current_user.get("sub")
+    if payload.status not in ORDER_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Status must be one of {ORDER_STATUSES}",
+        )
+
     quotation_data = {
         "client_name": payload.client_name,
         "quotation_title": payload.quotation_title,
         "line_items": line_items_data,
         "status": payload.status,
+        "status_history": [
+            {
+                "status": payload.status,
+                "changed_at": datetime.utcnow().isoformat() + "Z",
+                "changed_by": username,
+                "note": "Created",
+            }
+        ],
         "tag": payload.tag,
     }
 
@@ -220,12 +274,17 @@ def update_quotation(
     quotation_id: Union[int, str],
     payload: QuotationUpdate,
     repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
 ):
     # Convert quotation_id based on database type
     if DB_TYPE == DatabaseType.MONGODB:
         quotation_id = str(quotation_id)
     else:
         quotation_id = int(quotation_id)
+
+    current = repo.get_by_id(quotation_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Quotation not found")
 
     update_data = payload.model_dump(exclude_unset=True)
 
@@ -235,12 +294,112 @@ def update_quotation(
             for item in update_data["line_items"]
         ]
 
+    # Record a status transition in history when the status actually changes.
+    if "status" in update_data and update_data["status"] is not None:
+        if update_data["status"] not in ORDER_STATUSES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Status must be one of {ORDER_STATUSES}",
+            )
+        if update_data["status"] != current.get("status"):
+            hist = list(current.get("status_history") or [])
+            hist.append(
+                {
+                    "status": update_data["status"],
+                    "changed_at": datetime.utcnow().isoformat() + "Z",
+                    "changed_by": current_user.get("username") or current_user.get("sub"),
+                    "note": "Status updated",
+                }
+            )
+            update_data["status_history"] = hist
+
     updated_quotation = repo.update(quotation_id, update_data)
 
     if not updated_quotation:
         raise HTTPException(status_code=404, detail="Quotation not found")
 
     return updated_quotation
+
+
+@app.post(
+    "/quotations/{quotation_id}/status",
+    response_model=QuotationResponse,
+    dependencies=[Depends(require_role(["ADMIN", "MANAGER", "STAFF"]))],
+)
+def advance_quotation_status(
+    quotation_id: Union[int, str],
+    payload: QuotationAdvanceStatus,
+    repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
+):
+    """Advance an order through its lifecycle, recording the transition."""
+    if payload.status not in ORDER_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Status must be one of {ORDER_STATUSES}",
+        )
+
+    if DB_TYPE == DatabaseType.MONGODB:
+        qid = str(quotation_id)
+    else:
+        qid = int(quotation_id)
+
+    current = repo.get_by_id(qid)
+    if not current:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+
+    current_status = current.get("status")
+    allowed = ORDER_STATUS_TRANSITIONS.get(current_status, [])
+    if payload.status != current_status and payload.status not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot move from '{current_status}' to '{payload.status}'. "
+            f"Allowed next: {allowed or ['none (terminal)']}",
+        )
+
+    hist = list(current.get("status_history") or [])
+    hist.append(
+        {
+            "status": payload.status,
+            "changed_at": datetime.utcnow().isoformat() + "Z",
+            "changed_by": current_user.get("username") or current_user.get("sub"),
+            "note": payload.note,
+        }
+    )
+
+    updated = repo.update(qid, {"status": payload.status, "status_history": hist})
+    if not updated:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+    return updated
+
+
+@app.get(
+    "/quotations/{quotation_id}/tracking",
+    dependencies=[Depends(require_role(["ADMIN", "MANAGER", "STAFF"]))],
+)
+def track_quotation(
+    quotation_id: Union[int, str],
+    repo: QuotationRepository = Depends(get_repository),
+):
+    """Customer/operator-facing order timeline (status + history, no PII)."""
+    if DB_TYPE == DatabaseType.MONGODB:
+        qid = str(quotation_id)
+    else:
+        qid = int(quotation_id)
+
+    current = repo.get_by_id(qid)
+    if not current:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+
+    return {
+        "id": current.get("id"),
+        "quotation_title": current.get("quotation_title"),
+        "tag": current.get("tag"),
+        "status": current.get("status"),
+        "status_history": current.get("status_history") or [],
+        "created_at": current.get("created_at"),
+        "updated_at": current.get("updated_at"),
+    }
 
 
 @app.delete(

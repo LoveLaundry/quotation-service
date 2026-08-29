@@ -19,6 +19,7 @@ class PostgreSQLQuotationRepository(QuotationRepository):
             "quotation_title": quotation.quotation_title,
             "line_items": quotation.line_items,
             "status": quotation.status,
+            "status_history": quotation.status_history or [],
             "tag": quotation.tag,
             "created_at": quotation.created_at,
             "updated_at": quotation.updated_at,
@@ -46,6 +47,7 @@ class PostgreSQLQuotationRepository(QuotationRepository):
             quotation_title=quotation_data.get("quotation_title"),
             line_items=quotation_data.get("line_items", []),
             status=quotation_data.get("status", "draft"),
+            status_history=quotation_data.get("status_history", []),
             tag=quotation_data.get("tag", "shop"),
         )
         
