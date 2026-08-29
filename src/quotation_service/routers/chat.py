@@ -1,16 +1,15 @@
 """
 Public chatbot conversations (encrypted at rest).
 
-- Every message's `text` and the conversation `guest_name` are envelope-encrypted
-  with MASTER_KEY (same scheme as bills/gatepasses) via crypto_helper.
-- Messages live in `chat_messages` so they can be appended individually; the
-  conversation metadata (with the encrypted guest_name) lives in
-  `chat_conversations`.
+- Every message's `text` and the conversation `guest_name` + `participants`
+  are envelope-encrypted with MASTER_KEY (same scheme as bills/gatepasses).
+- A conversation can be a 1:1 chat or a GROUP: `participants` holds the
+  client-side members [{ guest_id, name }]; `title` is an optional group name.
 - Guests (public.lovelaundry.lk) post messages; the service stores them and,
   unless an admin has taken over, asks lovelaundry-bot for a reply.
 - Admins (quotation-ui) can list every conversation, read the full (decrypted)
-  history, take over a conversation (which suppresses the bot), and reply as
-  themselves.
+  history + members, take over a conversation (which suppresses the bot),
+  rename the group, and reply as themselves.
 """
 import json
 import os
@@ -36,7 +35,7 @@ BOT_API_KEY = os.getenv("CHAT_API_KEY")
 # Fallback when the bot is unreachable / unconfigured.
 BOT_FALLBACK = "Thank you for your message. Our team will get back to you shortly."
 
-SENSITIVE_CONV = ["guest_name"]
+SENSITIVE_CONV = ["guest_name", "participants"]
 SENSITIVE_MSG = ["text"]
 
 
@@ -44,12 +43,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _new_message(sender: str, text: str, sender_name: Optional[str] = None) -> dict:
+def _new_message(
+    sender: str,
+    text: str,
+    sender_name: Optional[str] = None,
+    sender_guest_id: Optional[str] = None,
+) -> dict:
     return {
         "id": str(uuid.uuid4()),
         "conversation_id": None,  # set by the caller
         "sender": sender,  # guest | bot | admin
         "sender_name": sender_name,
+        "sender_guest_id": sender_guest_id,
         "text": text,
         "timestamp": _now(),
     }
@@ -62,6 +67,7 @@ def _insert_message(conversation_id: str, msg: dict) -> None:
             "conversation_id": conversation_id,
             "sender": msg["sender"],
             "sender_name": msg["sender_name"],
+            "sender_guest_id": msg.get("sender_guest_id"),
             "text": msg["text"],
             "timestamp": msg["timestamp"],
         },
@@ -80,6 +86,7 @@ def _decrypt_message(raw: dict) -> dict:
         "conversation_id": d.get("conversation_id"),
         "sender": d.get("sender"),
         "sender_name": d.get("sender_name"),
+        "sender_guest_id": d.get("sender_guest_id"),
         "text": d.get("text"),
         "timestamp": ts.isoformat() if isinstance(ts, datetime) else ts,
     }
@@ -94,10 +101,19 @@ def _decrypt_conversation(raw: dict) -> dict:
     d = decrypt_dict(raw, SENSITIVE_CONV)
     d.pop("encryption_metadata", None)
     d.pop("_id", None)
+    participants = d.get("participants")
+    if not participants:
+        participants = (
+            [{"guest_id": d.get("guest_id"), "name": d.get("guest_name")}]
+            if d.get("guest_name")
+            else []
+        )
     return {
         "conversation_id": conv_id,
         "guest_id": d.get("guest_id"),
         "guest_name": d.get("guest_name"),
+        "participants": participants,
+        "title": d.get("title"),
         "assigned_admin_name": d.get("assigned_admin_name"),
         "status": d.get("status", "open"),
         "created_at": d.get("created_at"),
@@ -105,7 +121,12 @@ def _decrypt_conversation(raw: dict) -> dict:
     }
 
 
-def _get_or_create(conversation_id: str, guest_id: str, guest_name: Optional[str]) -> dict:
+def _get_or_create(
+    conversation_id: str,
+    participants: list,
+    title: Optional[str],
+    guest_name: Optional[str],
+) -> dict:
     raw = _get_conversation_raw(conversation_id)
     if raw:
         return raw
@@ -113,8 +134,10 @@ def _get_or_create(conversation_id: str, guest_id: str, guest_name: Optional[str
     conv = encrypt_dict(
         {
             "_id": conversation_id,
-            "guest_id": guest_id,
+            "guest_id": participants[0]["guest_id"] if participants else None,
             "guest_name": guest_name,
+            "participants": participants,
+            "title": title,
             "assigned_admin_name": None,
             "status": "open",
             "created_at": now,
@@ -160,15 +183,31 @@ class GuestMessageIn(BaseModel):
     message: str
     guest_id: str
     lang: str = "en"
-    guest_name: Optional[str] = None
+    name: Optional[str] = None
+    participants: Optional[list] = None
+    title: Optional[str] = None
 
 
 @router.post("/conversations/{conversation_id}/messages")
 def post_guest_message(conversation_id: str, body: GuestMessageIn):
     """Guest sends a message. Bot replies unless an admin has taken over."""
-    raw = _get_or_create(conversation_id, body.guest_id, body.guest_name)
+    participants = body.participants or []
+    if body.name and not any(
+        p.get("guest_id") == body.guest_id for p in participants
+    ):
+        participants.append({"guest_id": body.guest_id, "name": body.name})
+    if not participants:
+        participants = [
+            {"guest_id": body.guest_id, "name": body.name or body.guest_id}
+        ]
 
-    new_messages = [_new_message("guest", body.message)]
+    raw = _get_or_create(
+        conversation_id, participants, body.title, body.name or participants[0]["name"]
+    )
+
+    new_messages = [
+        _new_message("guest", body.message, body.name, body.guest_id)
+    ]
     bot_replied = False
     if not raw.get("assigned_admin_name"):
         reply = _call_bot(body.message, body.lang)
@@ -181,12 +220,45 @@ def post_guest_message(conversation_id: str, body: GuestMessageIn):
 
     chat_collection.update_one({"_id": conversation_id}, {"$set": {"updated_at": _now()}})
 
+    conv = _decrypt_conversation(_get_conversation_raw(conversation_id))
     return {
         "conversation_id": conversation_id,
         "messages": _messages_for(conversation_id),
-        "assigned_admin_name": raw.get("assigned_admin_name"),
+        "participants": conv["participants"],
+        "title": conv["title"],
+        "assigned_admin_name": conv["assigned_admin_name"],
         "bot_replied": bot_replied,
     }
+
+
+@router.post("/conversations/{conversation_id}/participants")
+def add_participant(
+    conversation_id: str,
+    body: dict,
+):
+    """Add a member to a group conversation (public)."""
+    guest_id = body.get("guest_id")
+    name = body.get("name")
+    if not guest_id or not name:
+        raise HTTPException(status_code=400, detail="guest_id and name are required")
+
+    raw = _get_conversation_raw(conversation_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    dec = decrypt_dict(raw, SENSITIVE_CONV)
+    participants = dec.get("participants") or []
+    if not any(p.get("guest_id") == guest_id for p in participants):
+        participants.append({"guest_id": guest_id, "name": name})
+    if not dec.get("guest_name") and participants:
+        dec["guest_name"] = participants[0]["name"]
+
+    dec["updated_at"] = _now()
+    new_doc = encrypt_dict(dec, SENSITIVE_CONV)
+    chat_collection.replace_one({"_id": conversation_id}, new_doc)
+
+    conv = _decrypt_conversation(_get_conversation_raw(conversation_id))
+    return conv
 
 
 @router.get("/conversations/{conversation_id}")
@@ -201,6 +273,8 @@ def get_guest_conversation(
         return {
             "conversation_id": conversation_id,
             "messages": [],
+            "participants": [],
+            "title": None,
             "assigned_admin_name": None,
         }
     conv = _decrypt_conversation(raw)
@@ -230,7 +304,13 @@ def admin_list_conversations(
             {"conversation_id": conv["conversation_id"]}, sort=[("timestamp", -1)]
         )
         last_message = _decrypt_message(last_raw) if last_raw else None
-        result.append({**conv, "message_count": count, "last_message": last_message})
+        result.append(
+            {
+                **conv,
+                "message_count": count,
+                "last_message": last_message,
+            }
+        )
     return result
 
 
@@ -273,8 +353,7 @@ def admin_post_message(
         {"_id": conversation_id},
         {"$set": {"assigned_admin_name": sender_name, "updated_at": _now()}},
     )
-    updated = _get_conversation_raw(conversation_id)
-    conv = _decrypt_conversation(updated)
+    conv = _decrypt_conversation(_get_conversation_raw(conversation_id))
     return {**conv, "messages": _messages_for(conversation_id)}
 
 
@@ -282,6 +361,7 @@ class AdminUpdateIn(BaseModel):
     status: Optional[str] = None
     guest_name: Optional[str] = None
     assigned_admin_name: Optional[str] = None
+    title: Optional[str] = None
 
 
 @router.patch(
@@ -295,6 +375,8 @@ def admin_update_conversation(conversation_id: str, body: AdminUpdateIn):
     dec = decrypt_dict(raw, SENSITIVE_CONV)
     if body.guest_name is not None:
         dec["guest_name"] = body.guest_name
+    if body.title is not None:
+        dec["title"] = body.title
     if body.assigned_admin_name is not None:
         dec["assigned_admin_name"] = body.assigned_admin_name
     if body.status is not None:
@@ -302,6 +384,5 @@ def admin_update_conversation(conversation_id: str, body: AdminUpdateIn):
     dec["updated_at"] = _now()
     new_doc = encrypt_dict(dec, SENSITIVE_CONV)
     chat_collection.replace_one({"_id": conversation_id}, new_doc)
-    updated = _get_conversation_raw(conversation_id)
-    conv = _decrypt_conversation(updated)
+    conv = _decrypt_conversation(_get_conversation_raw(conversation_id))
     return {**conv, "messages": _messages_for(conversation_id)}
