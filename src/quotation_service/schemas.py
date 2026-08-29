@@ -89,3 +89,35 @@ class QuotationResponse(BaseModel):
         return value.isoformat()
 
     model_config = {"from_attributes": True}
+
+
+# ─── Garment tags (QR) ─────────────────────────────────────────────────────────
+class TagCreate(BaseModel):
+    """Request to mint QR tags for an order.
+
+    `per_item=True` mints one tag per line item (labelled with the item name).
+    Otherwise `count` loose tags are minted, optionally sharing `label`.
+    """
+
+    count: int = 1
+    per_item: bool = False
+    label: Optional[str] = None
+
+
+class TagOut(BaseModel):
+    id: Union[int, str]
+    code: str
+    quotation_id: Union[int, str]
+    line_item_id: Optional[str] = None
+    label: Optional[str] = None
+    created_at: datetime | None = None
+    tracking_url: str = ""
+
+    @field_serializer("created_at")
+    def serialize_dt(self, value: datetime | None) -> str | None:
+        return value.isoformat() if value else None
+
+
+class TagsResponse(BaseModel):
+    quotation_id: Union[int, str]
+    tags: list[TagOut] = []

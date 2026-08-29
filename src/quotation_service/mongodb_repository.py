@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+import secrets
 from bson import ObjectId
 
 from .repository import QuotationRepository
@@ -159,3 +160,63 @@ class MongoDBQuotationRepository(QuotationRepository):
     def close(self):
         """Close the MongoDB connection"""
         pass
+
+    # ─── Garment tags ──────────────────────────────────────────────────────────
+    @property
+    def _tags(self):
+        return self.collection.database["garment_tags"]
+
+    def _gen_tag_code(self) -> str:
+        while True:
+            code = secrets.token_urlsafe(6)
+            if self._tags.find_one({"code": code}) is None:
+                return code
+
+    def create_tags(
+        self,
+        quotation_id: str,
+        count: int,
+        per_item: bool,
+        label: Optional[str],
+    ) -> Optional[List[Dict[str, Any]]]:
+        q = self.get_by_id(quotation_id)
+        if not q:
+            return None
+        items = q.get("line_items") or []
+        specs: List[tuple] = []
+        if per_item and items:
+            for it in items:
+                specs.append(
+                    (str(it["id"]) if it.get("id") is not None else None, it.get("item_name"))
+                )
+        else:
+            for _ in range(max(1, int(count or 1))):
+                specs.append((None, label))
+        created: List[Dict[str, Any]] = []
+        for lid, lab in specs:
+            code = self._gen_tag_code()
+            doc = {
+                "code": code,
+                "quotation_id": str(quotation_id),
+                "line_item_id": lid,
+                "label": lab,
+                "created_at": datetime.utcnow(),
+            }
+            self._tags.insert_one(doc)
+            doc["id"] = str(doc.pop("_id"))
+            created.append(doc)
+        return created
+
+    def list_tags(self, quotation_id: str) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for d in self._tags.find({"quotation_id": str(quotation_id)}).sort("created_at", 1):
+            d["id"] = str(d.pop("_id"))
+            out.append(d)
+        return out
+
+    def get_tag(self, code: str) -> Optional[Dict[str, Any]]:
+        d = self._tags.find_one({"code": code})
+        if not d:
+            return None
+        d["id"] = str(d.pop("_id"))
+        return d

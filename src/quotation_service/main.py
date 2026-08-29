@@ -13,6 +13,9 @@ from .schemas import (
     QuotationUpdate,
     QuotationResponse,
     QuotationAdvanceStatus,
+    TagCreate,
+    TagOut,
+    TagsResponse,
     ORDER_STATUSES,
     ORDER_STATUS_TRANSITIONS,
 )
@@ -64,6 +67,18 @@ except Exception as e:
     ALLOW_CREDENTIALS = True
 
 ON_VERCEL = os.getenv("VERCEL") == "1"
+
+# Public storefront used to build scannable tag/tracking URLs.
+PUBLIC_BASE = (os.getenv("PUBLIC_BASE", "https://public.lovelaundry.lk")).rstrip("/")
+
+
+def _norm_qid(quotation_id: Union[int, str]) -> Union[int, str]:
+    """Coerce a path id to the type expected by the active repository."""
+    return str(quotation_id) if DB_TYPE == DatabaseType.MONGODB else int(quotation_id)
+
+
+def _tracking_url(code: str) -> str:
+    return f"{PUBLIC_BASE}/track?tag={code}"
 
 SENTRY_DSN = os.getenv("SENTRY_DSN")
 if SENTRY_DSN:
@@ -421,3 +436,110 @@ def delete_quotation(
         raise HTTPException(status_code=404, detail="Quotation not found")
 
     return {"message": "Quotation deleted successfully"}
+
+
+# ─── Garment tags (QR) ──────────────────────────────────────────────────────────
+@app.post(
+    "/quotations/{quotation_id}/tags",
+    response_model=TagsResponse,
+    dependencies=[Depends(require_role(["ADMIN", "MANAGER"]))],
+)
+def create_quotation_tags(
+    quotation_id: Union[int, str],
+    payload: TagCreate,
+    repo: QuotationRepository = Depends(get_repository),
+):
+    """Mint QR garment tags for an order (one per line item or N loose tags)."""
+    qid = _norm_qid(quotation_id)
+    tags = repo.create_tags(qid, payload.count, payload.per_item, payload.label)
+    if tags is None:
+        raise HTTPException(status_code=404, detail="Quotation not found")
+    return TagsResponse(
+        quotation_id=qid,
+        tags=[
+            TagOut(
+                id=t["id"],
+                code=t["code"],
+                quotation_id=t["quotation_id"],
+                line_item_id=t.get("line_item_id"),
+                label=t.get("label"),
+                created_at=t.get("created_at"),
+                tracking_url=_tracking_url(t["code"]),
+            )
+            for t in tags
+        ],
+    )
+
+
+@app.get(
+    "/quotations/{quotation_id}/tags",
+    response_model=TagsResponse,
+    dependencies=[Depends(require_role(["ADMIN", "MANAGER", "STAFF"]))],
+)
+def list_quotation_tags(
+    quotation_id: Union[int, str],
+    repo: QuotationRepository = Depends(get_repository),
+):
+    qid = _norm_qid(quotation_id)
+    tags = repo.list_tags(qid)
+    return TagsResponse(
+        quotation_id=qid,
+        tags=[
+            TagOut(
+                id=t["id"],
+                code=t["code"],
+                quotation_id=t["quotation_id"],
+                line_item_id=t.get("line_item_id"),
+                label=t.get("label"),
+                created_at=t.get("created_at"),
+                tracking_url=_tracking_url(t["code"]),
+            )
+            for t in tags
+        ],
+    )
+
+
+@app.get("/tags/{code}")
+def lookup_tag(code: str, repo: QuotationRepository = Depends(get_repository)):
+    """Public: resolve a scanned tag to its order status (no PII beyond first name)."""
+    tag = repo.get_tag(code)
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    qid = tag["quotation_id"]
+    q = repo.get_by_id(qid)
+    if not q:
+        raise HTTPException(status_code=404, detail="Order not found")
+    client = q.get("client_name") or ""
+    first_name = client.split()[0] if client else ""
+    return {
+        "code": tag["code"],
+        "quotation_id": qid,
+        "label": tag.get("label"),
+        "client_first_name": first_name,
+        "quotation_title": q.get("quotation_title"),
+        "status": q.get("status"),
+        "status_history": q.get("status_history") or [],
+        "tracking_url": _tracking_url(code),
+    }
+
+
+@app.get("/tags/{code}/tracking")
+def tag_tracking(code: str, repo: QuotationRepository = Depends(get_repository)):
+    """Public: order timeline for a scanned tag (same shape as /tracking)."""
+    tag = repo.get_tag(code)
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    qid = tag["quotation_id"]
+    q = repo.get_by_id(qid)
+    if not q:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {
+        "id": q.get("id"),
+        "quotation_title": q.get("quotation_title"),
+        "tag": q.get("tag"),
+        "status": q.get("status"),
+        "status_history": q.get("status_history") or [],
+        "created_at": q.get("created_at"),
+        "updated_at": q.get("updated_at"),
+        "garment_label": tag.get("label"),
+    }
