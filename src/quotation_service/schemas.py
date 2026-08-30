@@ -41,11 +41,21 @@ class StatusHistoryEntry(BaseModel):
     note: Optional[str] = None
 
 
+class SpecificationSchema(BaseModel):
+    """A variant/specification of a line item (e.g. colour + size), each with its own agreed price."""
+
+    specification: str
+    unit_price: float
+
+
 class LineItemSchema(BaseModel):
     item_name: str
     category: str | None = None
     unit_price: float
     notes: str | None = None
+    # Optional list of colour/size variants, each with a (possibly different) price.
+    # unit_price remains the base/agreement price and is what bill_service matches by item_name.
+    specifications: list[SpecificationSchema] | None = None
 
 
 class QuotationCreate(BaseModel):
