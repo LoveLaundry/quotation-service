@@ -11,7 +11,7 @@ State machine:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from ..database.main_db import sync_status_collection
 from ..repositories.main_repository import get_sync_status, record_sync_status
@@ -80,6 +80,11 @@ def verify_against_secondary(entity: str, record_id: Any, main_version: int) -> 
 def get_verification(entity: str, record_id: Any) -> dict:
     """Return the public verification payload for a record."""
     row = get_sync_status(entity, record_id)
+    return _verification_payload(row)
+
+
+def _verification_payload(row: Optional[dict]) -> dict:
+    """Build the public verification payload from a sync_status row."""
     if not row:
         return {
             "status": STATUS_PENDING,
@@ -96,6 +101,27 @@ def get_verification(entity: str, record_id: Any) -> dict:
         "secondary_version": row.get("secondary_version"),
         "error": row.get("error"),
     }
+
+
+def attach_verifications_bulk(entity: str, serialized_list: List[dict]) -> List[dict]:
+    """
+    Fetch verification state for many records in a single query and attach it
+    to each serialized document (avoids one sync_status lookup per record).
+    """
+    if not serialized_list:
+        return serialized_list
+
+    ids = [str(s.get("id")) for s in serialized_list]
+    rows = sync_status_collection.find(
+        {"entity": entity, "record_id": {"$in": ids}}
+    )
+    status_by_id: dict = {str(r.get("record_id")): r for r in rows}
+
+    for serialized in serialized_list:
+        serialized["verification"] = _verification_payload(
+            status_by_id.get(str(serialized.get("id")))
+        )
+    return serialized_list
 
 
 def attach_verification_to(entity: str, record_id: Any, serialized: dict) -> dict:
