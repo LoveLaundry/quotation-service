@@ -7,7 +7,7 @@ from .repository import QuotationRepository
 from .config import MONGODB_COLLECTION
 from .crypto_helper import encrypt_dict, decrypt_dict, get_search_token
 from .database.main_db import quotations_collection
-from .repositories.main_repository import bump_version, enqueue_sync
+from .repositories.main_repository import bump_version, enqueue_delete, enqueue_sync
 from .services.verification_service import attach_verification_to, attach_verifications_bulk
 
 SENSITIVE_FIELDS = ["client_name", "quotation_title", "line_items"]
@@ -153,8 +153,18 @@ class MongoDBQuotationRepository(QuotationRepository):
     def delete(self, quotation_id: str) -> bool:
         """Delete a quotation"""
         try:
-            result = self.collection.delete_one({"_id": ObjectId(quotation_id)})
-            return result.deleted_count > 0
+            oid = ObjectId(quotation_id)
+            # Bump the version while the document still exists, then remove it
+            # and enqueue a DELETE so the SECONDARY replica drops the record.
+            try:
+                new_version = bump_version("quotation", oid)
+            except KeyError:
+                return False
+            result = self.collection.delete_one({"_id": oid})
+            if result.deleted_count == 0:
+                return False
+            enqueue_delete("quotation", oid, new_version)
+            return True
         except Exception:
             return False
 
