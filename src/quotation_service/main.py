@@ -4,6 +4,7 @@ from typing import Union
 from datetime import datetime
 from sqlalchemy import text
 
+from .app_time import utc_iso_z
 from .config import DB_TYPE, DatabaseType
 from .repository import QuotationRepository
 from .repository_factory import get_repository, close_connections
@@ -266,7 +267,7 @@ def create_quotation(
         "status_history": [
             {
                 "status": payload.status,
-                "changed_at": datetime.utcnow().isoformat() + "Z",
+                "changed_at": utc_iso_z(),
                 "changed_by": username,
                 "note": "Created",
             }
@@ -322,7 +323,7 @@ def update_quotation(
             hist.append(
                 {
                     "status": update_data["status"],
-                    "changed_at": datetime.utcnow().isoformat() + "Z",
+                    "changed_at": utc_iso_z(),
                     "changed_by": current_user.get("username") or current_user.get("sub"),
                     "note": "Status updated",
                 }
@@ -377,7 +378,7 @@ def advance_quotation_status(
     hist.append(
         {
             "status": payload.status,
-            "changed_at": datetime.utcnow().isoformat() + "Z",
+            "changed_at": utc_iso_z(),
             "changed_by": current_user.get("username") or current_user.get("sub"),
             "note": payload.note,
         }

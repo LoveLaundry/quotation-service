@@ -1,3 +1,4 @@
+from ..app_time import UTC
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import secrets
@@ -84,7 +85,7 @@ class MongoDBQuotationRepository(QuotationRepository):
 
     def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new quotation"""
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
 
         document = {
             "client_name": quotation_data["client_name"],
@@ -127,7 +128,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             # Merge updates
             decrypted_original.update(update_data)
             decrypted_original.pop("created_at", None)
-            decrypted_original["updated_at"] = datetime.utcnow()
+            decrypted_original["updated_at"] = datetime.now(UTC)
 
             # Encrypt new state
             encrypted_new = encrypt_dict(decrypted_original, SENSITIVE_FIELDS)
@@ -211,7 +212,7 @@ class MongoDBQuotationRepository(QuotationRepository):
                 "quotation_id": str(quotation_id),
                 "line_item_id": lid,
                 "label": lab,
-                "created_at": datetime.utcnow(),
+                "created_at": datetime.now(UTC),
             }
             self._tags.insert_one(doc)
             doc["id"] = str(doc.pop("_id"))
