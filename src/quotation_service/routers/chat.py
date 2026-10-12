@@ -121,6 +121,18 @@ def _decrypt_conversation(raw: dict) -> dict:
     }
 
 
+def _participant_ids(raw: dict) -> set:
+    """Guest ids allowed to read/write a conversation (empty = legacy doc)."""
+    dec = decrypt_dict(raw, SENSITIVE_CONV)
+    participants = dec.get("participants")
+    ids = {p.get("guest_id") for p in participants}
+    # Legacy single-owner documents: the owner is whoever created it.
+    if dec.get("guest_id"):
+        ids.add(dec["guest_id"])
+    ids.discard(None)
+    return ids
+
+
 def _get_or_create(
     conversation_id: str,
     participants: list,
@@ -190,7 +202,18 @@ class GuestMessageIn(BaseModel):
 
 @router.post("/conversations/{conversation_id}/messages")
 def post_guest_message(conversation_id: str, body: GuestMessageIn):
-    """Guest sends a message. Bot replies unless an admin has taken over."""
+    """Guest sends a message. Bot replies unless an admin has taken over.
+
+    Only a guest already in the conversation may send into an existing thread;
+    the first message from a brand-new guest_id creates the conversation.
+    """
+    raw = _get_conversation_raw(conversation_id)
+    if raw and body.guest_id not in _participant_ids(raw):
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have access to this conversation",
+        )
+
     participants = body.participants or []
     if body.name and not any(
         p.get("guest_id") == body.guest_id for p in participants
@@ -201,6 +224,7 @@ def post_guest_message(conversation_id: str, body: GuestMessageIn):
             {"guest_id": body.guest_id, "name": body.name or body.guest_id}
         ]
 
+    created = raw is None
     raw = _get_or_create(
         conversation_id, participants, body.title, body.name or participants[0]["name"]
     )
@@ -223,6 +247,7 @@ def post_guest_message(conversation_id: str, body: GuestMessageIn):
     conv = _decrypt_conversation(_get_conversation_raw(conversation_id))
     return {
         "conversation_id": conversation_id,
+        "created": created,
         "messages": _messages_for(conversation_id),
         "participants": conv["participants"],
         "title": conv["title"],
@@ -236,7 +261,12 @@ def add_participant(
     conversation_id: str,
     body: dict,
 ):
-    """Add a member to a group conversation (public)."""
+    """Add a member to a group conversation (public).
+
+    A guest may add *themselves* only if the invite comes from an existing
+    participant (``inviter_guest_id``) so strangers can't join a thread just
+    by guessing its id.
+    """
     guest_id = body.get("guest_id")
     name = body.get("name")
     if not guest_id or not name:
@@ -248,8 +278,22 @@ def add_participant(
 
     dec = decrypt_dict(raw, SENSITIVE_CONV)
     participants = dec.get("participants") or []
-    if not any(p.get("guest_id") == guest_id for p in participants):
+
+    inviter_id = body.get("inviter_guest_id")
+    already_in = any(p.get("guest_id") == guest_id for p in participants)
+    if not already_in:
+        if not inviter_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Only a participant can invite someone into this conversation",
+            )
+        if inviter_id not in _participant_ids(raw):
+            raise HTTPException(
+                status_code=403,
+                detail="Only a participant can invite someone into this conversation",
+            )
         participants.append({"guest_id": guest_id, "name": name})
+
     if not dec.get("guest_name") and participants:
         dec["guest_name"] = participants[0]["name"]
 
@@ -264,21 +308,34 @@ def add_participant(
 @router.get("/conversations/{conversation_id}")
 def get_guest_conversation(
     conversation_id: str,
-    guest_id: Optional[str] = Query(None),
+    guest_id: str = Query(...),
 ):
     """Public history poll. Guest uses this to learn new messages and who
-    is handling the conversation."""
+    is handling the conversation.
+
+    Only a participant of the conversation may read its history; guessing
+    someone else's conversation id leaks nothing.
+    """
     raw = _get_conversation_raw(conversation_id)
     if not raw:
-        return {
-            "conversation_id": conversation_id,
-            "messages": [],
-            "participants": [],
-            "title": None,
-            "assigned_admin_name": None,
-        }
+        return _empty_guest_conversation(conversation_id)
+    if guest_id not in _participant_ids(raw):
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have access to this conversation",
+        )
     conv = _decrypt_conversation(raw)
     return {**conv, "messages": _messages_for(conversation_id)}
+
+
+def _empty_guest_conversation(conversation_id: str) -> dict:
+    return {
+        "conversation_id": conversation_id,
+        "messages": [],
+        "participants": [],
+        "title": None,
+        "assigned_admin_name": None,
+    }
 
 
 # ── Admin endpoints (ADMIN / MANAGER) ────────────────────────────────────────
