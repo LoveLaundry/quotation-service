@@ -10,6 +10,7 @@ from .crypto_helper import encrypt_dict, decrypt_dict, get_search_token
 from .database.main_db import quotations_collection
 from .repositories.main_repository import bump_version, enqueue_delete, enqueue_sync
 from .services.verification_service import attach_verification_to, attach_verifications_bulk
+from .tenancy import scoped_query
 
 SENSITIVE_FIELDS = ["client_name", "quotation_title", "line_items"]
 
@@ -24,6 +25,17 @@ class MongoDBQuotationRepository(QuotationRepository):
         self.collection.create_index("client_name_search")
         self.collection.create_index("created_at")
         self.collection.create_index("tag")
+
+    def _scope(self, query: Optional[Dict[str, Any]], laundry_id: Optional[str]) -> Dict[str, Any]:
+        """Merge a business filter with the tenant scope.
+
+        ``laundry_id is None`` means unscoped (guest/platform/system callers).
+        For ``lovelaundry`` the scope also matches pre-tenancy documents with a
+        missing/null ``laundry_id`` (see tenancy.laundry_match).
+        """
+        if laundry_id is None:
+            return dict(query or {})
+        return scoped_query(query, laundry_id)
 
     def _serialize_document(self, doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Decrypt and convert MongoDB document to API response format"""
@@ -48,9 +60,9 @@ class MongoDBQuotationRepository(QuotationRepository):
             return doc
         return decrypt_dict(doc, SENSITIVE_FIELDS)
 
-    def get_all(self) -> List[Dict[str, Any]]:
-        """Get all quotations, sorted by created_at descending"""
-        documents = self.collection.find().sort("created_at", -1)
+    def get_all(self, laundry_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all quotations for a laundry, sorted by created_at descending"""
+        documents = self.collection.find(self._scope({}, laundry_id)).sort("created_at", -1)
         results = []
         for doc in documents:
             try:
@@ -60,10 +72,12 @@ class MongoDBQuotationRepository(QuotationRepository):
                 pass
         return attach_verifications_bulk("quotation", results)
 
-    def get_by_id(self, quotation_id: str) -> Optional[Dict[str, Any]]:
-        """Get a quotation by ID"""
+    def get_by_id(self, quotation_id: str, laundry_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get a quotation by ID, scoped to a laundry when provided"""
         try:
-            doc = self.collection.find_one({"_id": ObjectId(quotation_id)})
+            doc = self.collection.find_one(
+                self._scope({"_id": ObjectId(quotation_id)}, laundry_id)
+            )
             if not doc:
                 return None
             serialized = self._serialize_document(doc)
@@ -71,9 +85,11 @@ class MongoDBQuotationRepository(QuotationRepository):
         except Exception:
             return None
 
-    def get_by_tag(self, tag: str) -> List[Dict[str, Any]]:
-        """Get quotations filtered by tag"""
-        documents = self.collection.find({"tag": tag}).sort("created_at", -1)
+    def get_by_tag(self, tag: str, laundry_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get quotations filtered by tag, scoped to a laundry when provided"""
+        documents = self.collection.find(self._scope({"tag": tag}, laundry_id)).sort(
+            "created_at", -1
+        )
         results = []
         for doc in documents:
             try:
@@ -83,8 +99,8 @@ class MongoDBQuotationRepository(QuotationRepository):
                 pass
         return attach_verifications_bulk("quotation", results)
 
-    def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new quotation"""
+    def create(self, quotation_data: Dict[str, Any], laundry_id: Optional[str] = None) -> Dict[str, Any]:
+        """Create a new quotation, stamping laundry_id when provided"""
         now = datetime.now(UTC)
 
         document = {
@@ -96,6 +112,8 @@ class MongoDBQuotationRepository(QuotationRepository):
             "created_at": now,
             "updated_at": now,
         }
+        if laundry_id is not None:
+            document["laundry_id"] = laundry_id
 
         # Encrypt representation of document
         encrypted_document = encrypt_dict(document, SENSITIVE_FIELDS)
@@ -111,12 +129,13 @@ class MongoDBQuotationRepository(QuotationRepository):
         return attach_verification_to("quotation", result.inserted_id, serialized)
 
     def update(
-        self, quotation_id: str, update_data: Dict[str, Any]
+        self, quotation_id: str, update_data: Dict[str, Any], laundry_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Update an existing quotation"""
+        """Update an existing quotation, scoped to a laundry when provided"""
         try:
+            scoped = self._scope({"_id": ObjectId(quotation_id)}, laundry_id)
             # We need to fetch original document first to merge and encrypt properly
-            original = self.collection.find_one({"_id": ObjectId(quotation_id)})
+            original = self.collection.find_one(scoped)
             if not original:
                 return None
 
@@ -134,7 +153,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             encrypted_new = encrypt_dict(decrypted_original, SENSITIVE_FIELDS)
 
             result = self.collection.find_one_and_update(
-                {"_id": ObjectId(quotation_id)},
+                scoped,
                 {"$set": encrypted_new},
                 return_document=True,
             )
@@ -151,17 +170,22 @@ class MongoDBQuotationRepository(QuotationRepository):
         except Exception:
             return None
 
-    def delete(self, quotation_id: str) -> bool:
-        """Delete a quotation"""
+    def delete(self, quotation_id: str, laundry_id: Optional[str] = None) -> bool:
+        """Delete a quotation, scoped to a laundry when provided"""
         try:
             oid = ObjectId(quotation_id)
+            scoped = self._scope({"_id": oid}, laundry_id)
+            # Verify ownership before mutating: a foreign/missing document is
+            # indistinguishable from a missing one (404 oracle).
+            if self.collection.find_one(scoped) is None:
+                return False
             # Bump the version while the document still exists, then remove it
             # and enqueue a DELETE so the SECONDARY replica drops the record.
             try:
                 new_version = bump_version("quotation", oid)
             except KeyError:
                 return False
-            result = self.collection.delete_one({"_id": oid})
+            result = self.collection.delete_one(scoped)
             if result.deleted_count == 0:
                 return False
             enqueue_delete("quotation", oid, new_version)
@@ -190,8 +214,9 @@ class MongoDBQuotationRepository(QuotationRepository):
         count: int,
         per_item: bool,
         label: Optional[str],
+        laundry_id: Optional[str] = None,
     ) -> Optional[List[Dict[str, Any]]]:
-        q = self.get_by_id(quotation_id)
+        q = self.get_by_id(quotation_id, laundry_id=laundry_id)
         if not q:
             return None
         items = q.get("line_items") or []
@@ -214,20 +239,23 @@ class MongoDBQuotationRepository(QuotationRepository):
                 "label": lab,
                 "created_at": datetime.now(UTC),
             }
+            if laundry_id is not None:
+                doc["laundry_id"] = laundry_id
             self._tags.insert_one(doc)
             doc["id"] = str(doc.pop("_id"))
             created.append(doc)
         return created
 
-    def list_tags(self, quotation_id: str) -> List[Dict[str, Any]]:
+    def list_tags(self, quotation_id: str, laundry_id: Optional[str] = None) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
-        for d in self._tags.find({"quotation_id": str(quotation_id)}).sort("created_at", 1):
+        query = self._scope({"quotation_id": str(quotation_id)}, laundry_id)
+        for d in self._tags.find(query).sort("created_at", 1):
             d["id"] = str(d.pop("_id"))
             out.append(d)
         return out
 
-    def get_tag(self, code: str) -> Optional[Dict[str, Any]]:
-        d = self._tags.find_one({"code": code})
+    def get_tag(self, code: str, laundry_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        d = self._tags.find_one(self._scope({"code": code}, laundry_id))
         if not d:
             return None
         d["id"] = str(d.pop("_id"))
