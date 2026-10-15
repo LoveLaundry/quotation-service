@@ -50,6 +50,10 @@ def require_role(allowed_roles: list):
     def dependency(current_user: dict = Security(get_current_user)):
         role = str(current_user.get("role") or "").upper()
         allowed_upper = [r.upper() for r in allowed_roles]
+        # PLATFORM_ADMIN is a strict superset of ADMIN so audited support
+        # sessions can operate; narrower roles are unchanged.
+        if role == "PLATFORM_ADMIN" and "ADMIN" in allowed_upper:
+            return current_user
         if role not in allowed_upper:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
