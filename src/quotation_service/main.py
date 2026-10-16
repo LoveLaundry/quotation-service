@@ -141,8 +141,20 @@ def startup_event():
             logger.exception("Failed to start sync worker")
 
 
+def _sqlite_column_exists(conn, table: str, column: str) -> bool:
+    rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+    return any(r[1] == column for r in rows)
+
+
 def _migrate_quotation_schema():
-    """Add status_history to existing quotation tables (create_all won't alter)."""
+    """Add new columns to existing quotation tables (create_all won't alter).
+
+    SQLAlchemy's create_all creates missing *tables* only, so a new column on
+    an existing table needs an explicit ALTER. SQLite has no ``ADD COLUMN IF
+    NOT EXISTS``, hence the PRAGMA probe. ``laundry_id`` is nullable so rows
+    written before multi-tenancy read as LoveLaundry's (the sole historical
+    tenant).
+    """
     if DB_TYPE not in (DatabaseType.POSTGRESQL, DatabaseType.SQLITE):
         return
     try:
@@ -158,13 +170,24 @@ def _migrate_quotation_schema():
                         "status_history JSON NOT NULL DEFAULT '[]'::json"
                     )
                 )
-            else:
                 conn.execute(
-                    text(
-                        "ALTER TABLE quotations ADD COLUMN IF NOT EXISTS "
-                        "status_history JSON NOT NULL DEFAULT '[]'"
-                    )
+                    text("ALTER TABLE quotations ADD COLUMN IF NOT EXISTS laundry_id VARCHAR")
                 )
+                conn.execute(
+                    text("ALTER TABLE garment_tags ADD COLUMN IF NOT EXISTS laundry_id VARCHAR")
+                )
+            else:
+                if not _sqlite_column_exists(conn, "quotations", "status_history"):
+                    conn.execute(
+                        text(
+                            "ALTER TABLE quotations ADD COLUMN "
+                            "status_history JSON NOT NULL DEFAULT '[]'"
+                        )
+                    )
+                if not _sqlite_column_exists(conn, "quotations", "laundry_id"):
+                    conn.execute(text("ALTER TABLE quotations ADD COLUMN laundry_id VARCHAR"))
+                if not _sqlite_column_exists(conn, "garment_tags", "laundry_id"):
+                    conn.execute(text("ALTER TABLE garment_tags ADD COLUMN laundry_id VARCHAR"))
         logger.info("Quotation schema migration check completed")
     except Exception:
         logger.exception("Quotation schema migration failed")
