@@ -17,6 +17,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 # wide-open ("*") yet never fully locked down. Mirrors main.py's hardcoded list.
 DEFAULT_ALLOWED_ORIGINS = [
     "https://lovelaundry-manager.vercel.app",
+
+    "https://system-lovelaundry-lk.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
 ]
@@ -94,6 +96,11 @@ def apply_security(app: FastAPI, rate_limit: int = 300, origins: list[str] | Non
     from fastapi.middleware.cors import CORSMiddleware
 
     allowed_origins = _resolve_origins(origins)
+    # Starlette runs the most recently added middleware first. CORS goes last so
+    # it wraps the rate limiter: a 429 must still carry CORS headers, otherwise
+    # the browser reports the rejected request as a CORS failure.
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(RateLimitMiddleware, requests_per_minute=rate_limit)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
@@ -101,8 +108,6 @@ def apply_security(app: FastAPI, rate_limit: int = 300, origins: list[str] | Non
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.add_middleware(SecurityHeadersMiddleware)
-    app.add_middleware(RateLimitMiddleware, requests_per_minute=rate_limit)
 
 
 # ── Insecure-secret state tracking (for health endpoint) ─────────────────────
