@@ -1,3 +1,4 @@
+from .tenancy import TenantMiddleware
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Union
@@ -90,6 +91,8 @@ if SENTRY_DSN:
 app = FastAPI(title="Quotation Service", version="1.0.0")
 
 apply_security(app, rate_limit=300, origins=ALLOWED_ORIGINS)
+
+app.add_middleware(TenantMiddleware)
 
 
 @app.exception_handler(Exception)
