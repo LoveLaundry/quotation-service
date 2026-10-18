@@ -74,9 +74,16 @@ def _resolve_origins(origins) -> list[str]:
     if origins is not None:
         configured = [o.strip() for o in origins if o.strip() and o.strip() != "*"]
     else:
+        # Honor both env names (platform uses ALLOWED_ORIGINS, local tooling
+        # historically used CORS_ORIGINS) and merge them.
+        raw = ",".join(
+            part
+            for part in (os.getenv("CORS_ORIGINS", ""), os.getenv("ALLOWED_ORIGINS", ""))
+            if part.strip()
+        )
         configured = [
             o.strip()
-            for o in os.getenv("CORS_ORIGINS", "").split(",")
+            for o in raw.split(",")
             if o.strip() and o.strip() != "*"
         ]
     return list(dict.fromkeys(configured + DEFAULT_ALLOWED_ORIGINS))

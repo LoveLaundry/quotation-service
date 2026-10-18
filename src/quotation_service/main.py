@@ -5,6 +5,7 @@ from typing import Union
 from datetime import datetime
 from sqlalchemy import text
 
+from .app_time import utc_iso_z
 from .config import DB_TYPE, DatabaseType
 from .repository import QuotationRepository
 from .repository_factory import get_repository, close_connections
@@ -74,8 +75,17 @@ PUBLIC_BASE = (os.getenv("PUBLIC_BASE", "https://public.lovelaundry.lk")).rstrip
 
 
 def _norm_qid(quotation_id: Union[int, str]) -> Union[int, str]:
-    """Coerce a path id to the type expected by the active repository."""
-    return str(quotation_id) if DB_TYPE == DatabaseType.MONGODB else int(quotation_id)
+    """Coerce a path id to the type expected by the active repository.
+
+    A non-numeric id in a SQL backend must surface as a clean 404, not an
+    uncaught ``ValueError`` that collapses into a 500.
+    """
+    if DB_TYPE == DatabaseType.MONGODB:
+        return str(quotation_id)
+    try:
+        return int(quotation_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=404, detail="Quotation not found")
 
 
 def _tracking_url(code: str) -> str:
@@ -120,6 +130,18 @@ def startup_event():
     except Exception:
         logger.exception("Failed to initialize database schema on startup")
 
+    # The sync worker (MAIN -> SECONDARY replication) must run for every
+    # database backend. It used to live inside _migrate_quotation_schema,
+    # whose SQL-only guard returned early for MongoDB, so the worker silently
+    # never started on the production Mongo setup. Background threads are
+    # unreliable in Vercel serverless, so skip there (same rule as the other
+    # services).
+    if not ON_VERCEL:
+        try:
+            synchronization_service.start_worker()
+        except Exception:
+            logger.exception("Failed to start sync worker")
+
 
 def _migrate_quotation_schema():
     """Add status_history to existing quotation tables (create_all won't alter)."""
@@ -148,12 +170,6 @@ def _migrate_quotation_schema():
         logger.info("Quotation schema migration check completed")
     except Exception:
         logger.exception("Quotation schema migration failed")
-
-    if not ON_VERCEL:
-        try:
-            synchronization_service.start_worker()
-        except Exception:
-            logger.exception("Failed to start sync worker")
 
 
 @app.on_event("shutdown")
@@ -231,10 +247,7 @@ def get_quotation(
     repo: QuotationRepository = Depends(get_repository),
 ):
     # MongoDB uses string IDs, PostgreSQL uses integers
-    if DB_TYPE == DatabaseType.MONGODB:
-        quotation = repo.get_by_id(str(quotation_id))
-    else:
-        quotation = repo.get_by_id(int(quotation_id))
+    quotation = repo.get_by_id(_norm_qid(quotation_id))
 
     if not quotation:
         raise HTTPException(status_code=404, detail="Quotation not found")
@@ -269,7 +282,7 @@ def create_quotation(
         "status_history": [
             {
                 "status": payload.status,
-                "changed_at": datetime.utcnow().isoformat() + "Z",
+                "changed_at": utc_iso_z(),
                 "changed_by": username,
                 "note": "Created",
             }
@@ -296,10 +309,7 @@ def update_quotation(
     current_user: dict = Depends(get_current_user),
 ):
     # Convert quotation_id based on database type
-    if DB_TYPE == DatabaseType.MONGODB:
-        quotation_id = str(quotation_id)
-    else:
-        quotation_id = int(quotation_id)
+    quotation_id = _norm_qid(quotation_id)
 
     current = repo.get_by_id(quotation_id)
     if not current:
@@ -325,7 +335,7 @@ def update_quotation(
             hist.append(
                 {
                     "status": update_data["status"],
-                    "changed_at": datetime.utcnow().isoformat() + "Z",
+                    "changed_at": utc_iso_z(),
                     "changed_by": current_user.get("username") or current_user.get("sub"),
                     "note": "Status updated",
                 }
@@ -358,10 +368,7 @@ def advance_quotation_status(
             detail=f"Status must be one of {ORDER_STATUSES}",
         )
 
-    if DB_TYPE == DatabaseType.MONGODB:
-        qid = str(quotation_id)
-    else:
-        qid = int(quotation_id)
+    qid = _norm_qid(quotation_id)
 
     current = repo.get_by_id(qid)
     if not current:
@@ -380,7 +387,7 @@ def advance_quotation_status(
     hist.append(
         {
             "status": payload.status,
-            "changed_at": datetime.utcnow().isoformat() + "Z",
+            "changed_at": utc_iso_z(),
             "changed_by": current_user.get("username") or current_user.get("sub"),
             "note": payload.note,
         }
@@ -400,10 +407,7 @@ def track_quotation(
     repo: QuotationRepository = Depends(get_repository),
 ):
     """Customer/operator-facing order timeline (status + history, no PII)."""
-    if DB_TYPE == DatabaseType.MONGODB:
-        qid = str(quotation_id)
-    else:
-        qid = int(quotation_id)
+    qid = _norm_qid(quotation_id)
 
     current = repo.get_by_id(qid)
     if not current:
@@ -429,10 +433,7 @@ def delete_quotation(
     repo: QuotationRepository = Depends(get_repository),
 ):
     # Convert quotation_id based on database type
-    if DB_TYPE == DatabaseType.MONGODB:
-        quotation_id = str(quotation_id)
-    else:
-        quotation_id = int(quotation_id)
+    quotation_id = _norm_qid(quotation_id)
 
     success = repo.delete(quotation_id)
 

@@ -1,3 +1,4 @@
+from .app_time import stamp
 from datetime import datetime
 from typing import Union, Literal, Optional
 from pydantic import BaseModel, Field, field_serializer
@@ -96,7 +97,7 @@ class QuotationResponse(BaseModel):
     def serialize_datetime(self, value: datetime | None) -> str | None:
         if value is None:
             return None
-        return value.isoformat()
+        return stamp(value)
 
     model_config = {"from_attributes": True}
 
@@ -125,7 +126,7 @@ class TagOut(BaseModel):
 
     @field_serializer("created_at")
     def serialize_dt(self, value: datetime | None) -> str | None:
-        return value.isoformat() if value else None
+        return stamp(value) if value else None
 
 
 class TagsResponse(BaseModel):

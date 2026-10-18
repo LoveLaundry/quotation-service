@@ -1,3 +1,4 @@
+from .app_time import UTC
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import secrets
@@ -7,7 +8,7 @@ from .repository import QuotationRepository
 from .config import MONGODB_COLLECTION
 from .crypto_helper import encrypt_dict, decrypt_dict, get_search_token
 from .database.main_db import quotations_collection
-from .repositories.main_repository import bump_version, enqueue_sync
+from .repositories.main_repository import bump_version, enqueue_delete, enqueue_sync
 from .services.verification_service import attach_verification_to, attach_verifications_bulk
 
 SENSITIVE_FIELDS = ["client_name", "quotation_title", "line_items"]
@@ -84,7 +85,7 @@ class MongoDBQuotationRepository(QuotationRepository):
 
     def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new quotation"""
-        now = datetime.utcnow()
+        now = datetime.now(UTC)
 
         document = {
             "client_name": quotation_data["client_name"],
@@ -127,7 +128,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             # Merge updates
             decrypted_original.update(update_data)
             decrypted_original.pop("created_at", None)
-            decrypted_original["updated_at"] = datetime.utcnow()
+            decrypted_original["updated_at"] = datetime.now(UTC)
 
             # Encrypt new state
             encrypted_new = encrypt_dict(decrypted_original, SENSITIVE_FIELDS)
@@ -153,8 +154,18 @@ class MongoDBQuotationRepository(QuotationRepository):
     def delete(self, quotation_id: str) -> bool:
         """Delete a quotation"""
         try:
-            result = self.collection.delete_one({"_id": ObjectId(quotation_id)})
-            return result.deleted_count > 0
+            oid = ObjectId(quotation_id)
+            # Bump the version while the document still exists, then remove it
+            # and enqueue a DELETE so the SECONDARY replica drops the record.
+            try:
+                new_version = bump_version("quotation", oid)
+            except KeyError:
+                return False
+            result = self.collection.delete_one({"_id": oid})
+            if result.deleted_count == 0:
+                return False
+            enqueue_delete("quotation", oid, new_version)
+            return True
         except Exception:
             return False
 
@@ -201,7 +212,7 @@ class MongoDBQuotationRepository(QuotationRepository):
                 "quotation_id": str(quotation_id),
                 "line_item_id": lid,
                 "label": lab,
-                "created_at": datetime.utcnow(),
+                "created_at": datetime.now(UTC),
             }
             self._tags.insert_one(doc)
             doc["id"] = str(doc.pop("_id"))
