@@ -40,3 +40,11 @@ def ensure_indexes():
     chat_collection.create_index([("updated_at", -1)])
     chat_collection.create_index("guest_id")
     chat_messages_collection.create_index([("conversation_id", 1), ("timestamp", 1)])
+
+# ── Tenant enforcement ────────────────────────────────────────────────────
+# Every quotation read/write must carry the caller's laundry. Wrapping the
+# collection here (rather than in the repository) means no future call site can
+# forget: the guard is the only way to reach the data.
+from ..tenant_scope import TenantScopedCollection as _TenantScopedCollection  # noqa: E402
+
+quotations_collection = _TenantScopedCollection(quotations_collection, "quotations")

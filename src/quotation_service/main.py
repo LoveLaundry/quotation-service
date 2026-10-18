@@ -1,4 +1,3 @@
-from .tenancy import TenantMiddleware
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Union
@@ -21,7 +20,8 @@ from .schemas import (
     ORDER_STATUS_TRANSITIONS,
 )
 from .auth_helper import get_current_user, require_role
-from .security import apply_security, insecure_flags
+from .security import apply_security
+from .tenant_scope import TenantClaimsMiddleware, insecure_flags
 from .database.main_db import ensure_indexes
 from .database.connection_manager import close_all
 from .routers.admin_database import router as admin_database_router
@@ -101,8 +101,8 @@ if SENTRY_DSN:
 app = FastAPI(title="Quotation Service", version="1.0.0")
 
 apply_security(app, rate_limit=300, origins=ALLOWED_ORIGINS)
+app.add_middleware(TenantClaimsMiddleware)
 
-app.add_middleware(TenantMiddleware)
 
 
 @app.exception_handler(Exception)
