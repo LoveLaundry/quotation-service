@@ -235,8 +235,7 @@ def get_all_quotations(
 )
 def get_shop_quotations_guest(repo: QuotationRepository = Depends(get_repository)):
     """Public endpoint for guest users to view shop quotations only"""
-    quotations = repo.get_by_tag("shop")
-    return quotations
+    return repo.get_public_shop_quotations()
 
 
 @app.get(
@@ -411,7 +410,7 @@ def track_quotation(
     """Customer/operator-facing order timeline (status + history, no PII)."""
     qid = _norm_qid(quotation_id)
 
-    current = repo.get_by_id(qid)
+    current = repo.get_public_by_id(qid)
     if not current:
         raise HTTPException(status_code=404, detail="Quotation not found")
 
@@ -513,7 +512,7 @@ def lookup_tag(code: str, repo: QuotationRepository = Depends(get_repository)):
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
     qid = tag["quotation_id"]
-    q = repo.get_by_id(qid)
+    q = repo.get_public_by_id(qid)
     if not q:
         raise HTTPException(status_code=404, detail="Order not found")
     client = q.get("client_name") or ""
@@ -537,7 +536,7 @@ def tag_tracking(code: str, repo: QuotationRepository = Depends(get_repository))
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
     qid = tag["quotation_id"]
-    q = repo.get_by_id(qid)
+    q = repo.get_public_by_id(qid)
     if not q:
         raise HTTPException(status_code=404, detail="Order not found")
     return {

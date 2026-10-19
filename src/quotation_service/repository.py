@@ -19,6 +19,16 @@ class QuotationRepository(ABC):
     def get_by_tag(self, tag: str) -> List[Dict[str, Any]]:
         """Get quotations filtered by tag"""
         pass
+
+    @abstractmethod
+    def get_public_by_id(self, quotation_id: Any) -> Optional[Dict[str, Any]]:
+        """Capability read for unauthenticated guest tracking (no tenant)."""
+        pass
+
+    @abstractmethod
+    def get_public_shop_quotations(self) -> List[Dict[str, Any]]:
+        """Public storefront listing for the configured public laundry."""
+        pass
     
     @abstractmethod
     def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:

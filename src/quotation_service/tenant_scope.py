@@ -74,6 +74,18 @@ class TenantScopedCollection:
         self._collection = collection
         self._name = name
 
+    @property
+    def raw(self):
+        """Unscoped handle for the capability-based public endpoints.
+
+        Guest storefront / tracking / tag lookup run without a session, so no
+        tenant can be derived; the unguessable id or tag code is the credential
+        (exactly as these endpoints worked before multi-tenancy). There is NO
+        tenant predicate here — authenticated business reads must keep using
+        the scoped collection methods above.
+        """
+        return self._collection
+
     # ── helpers ────────────────────────────────────────────────────────────
     def _scope(self, filt: Optional[dict]) -> dict:
         return scoped_query(filt or {}, current_laundry_id())
