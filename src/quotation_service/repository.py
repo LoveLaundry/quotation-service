@@ -42,6 +42,16 @@ class QuotationRepository(ABC):
         pass
 
     @abstractmethod
+    def get_public_by_id(self, quotation_id: Any) -> Optional[Dict[str, Any]]:
+        """Capability read for unauthenticated guest tracking (no tenant)."""
+        pass
+
+    @abstractmethod
+    def get_public_shop_quotations(self) -> List[Dict[str, Any]]:
+        """Public storefront listing for the configured public laundry."""
+        pass
+    
+    @abstractmethod
     def create_tags(
         self,
         quotation_id: Any,

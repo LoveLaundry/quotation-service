@@ -64,8 +64,16 @@ class PostgreSQLQuotationRepository(QuotationRepository):
         quotations = query.order_by(Quotation.created_at.desc()).all()
         return [self._model_to_dict(q) for q in quotations]
 
-    def create(self, quotation_data: Dict[str, Any], laundry_id: Optional[str] = None) -> Dict[str, Any]:
-        """Create a new quotation, stamping laundry_id when provided"""
+    def get_public_by_id(self, quotation_id: int) -> Optional[Dict[str, Any]]:
+        """Capability read for unauthenticated guest tracking (no tenant)."""
+        return self.get_by_id(quotation_id)
+
+    def get_public_shop_quotations(self) -> List[Dict[str, Any]]:
+        """Public storefront listing for the configured public laundry."""
+        return self.get_by_tag("shop")
+    
+    def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new quotation"""
         new_quotation = Quotation(
             client_name=quotation_data["client_name"],
             quotation_title=quotation_data.get("quotation_title"),

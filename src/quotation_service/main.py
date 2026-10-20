@@ -20,8 +20,8 @@ from .schemas import (
     ORDER_STATUS_TRANSITIONS,
 )
 from .auth_helper import get_current_user, require_role
-from .tenancy import assert_same_laundry, resolve_laundry_id
-from .security import apply_security, insecure_flags
+from .security import apply_security
+from .tenant_scope import TenantClaimsMiddleware, insecure_flags
 from .database.main_db import ensure_indexes
 from .database.connection_manager import close_all
 from .routers.admin_database import router as admin_database_router
@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 # the ALLOWED_ORIGINS env var is not injected by the platform).
 DEFAULT_ALLOWED_ORIGINS = [
     "https://lovelaundry-manager.vercel.app",
+
+    "https://system-lovelaundry-lk.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
 ]
@@ -101,6 +103,8 @@ if SENTRY_DSN:
 app = FastAPI(title="Quotation Service", version="1.0.0")
 
 apply_security(app, rate_limit=300, origins=ALLOWED_ORIGINS)
+app.add_middleware(TenantClaimsMiddleware)
+
 
 
 @app.exception_handler(Exception)
@@ -256,9 +260,7 @@ def get_all_quotations(
 )
 def get_shop_quotations_guest(repo: QuotationRepository = Depends(get_repository)):
     """Public endpoint for guest users to view shop quotations only"""
-    # Public possession-based lookup — no session, deliberately unscoped.
-    quotations = repo.get_by_tag("shop", laundry_id=None)
-    return quotations
+    return repo.get_public_shop_quotations()
 
 
 @app.get(
@@ -442,9 +444,7 @@ def track_quotation(
     """Customer/operator-facing order timeline (status + history, no PII)."""
     qid = _norm_qid(quotation_id)
 
-    # Public possession-based lookup (love-bot / customer ref) — no session,
-    # deliberately unscoped.
-    current = repo.get_by_id(qid, laundry_id=None)
+    current = repo.get_public_by_id(qid)
     if not current:
         raise HTTPException(status_code=404, detail="Quotation not found")
 
@@ -556,7 +556,7 @@ def lookup_tag(code: str, repo: QuotationRepository = Depends(get_repository)):
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
     qid = tag["quotation_id"]
-    q = repo.get_by_id(qid, laundry_id=None)
+    q = repo.get_public_by_id(qid)
     if not q:
         raise HTTPException(status_code=404, detail="Order not found")
     client = q.get("client_name") or ""
@@ -581,7 +581,7 @@ def tag_tracking(code: str, repo: QuotationRepository = Depends(get_repository))
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
     qid = tag["quotation_id"]
-    q = repo.get_by_id(qid, laundry_id=None)
+    q = repo.get_public_by_id(qid)
     if not q:
         raise HTTPException(status_code=404, detail="Order not found")
     return {

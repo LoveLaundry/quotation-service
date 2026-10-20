@@ -47,6 +47,11 @@ else:
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "quotations_db")
 MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "quotations")
 
+# The laundry whose shop quotations are published on the guest storefront.
+# Defaults to the historical single-tenant laundry; other deployments can point
+# their public site at a different tenant without exposing everyone's listings.
+PUBLIC_LAUNDRY_ID = os.getenv("PUBLIC_LAUNDRY_ID", "lovelaundry")
+
 # ─── Three-database architecture (new) ─────────────────────────────────
 # MAIN        — production source of truth (all normal reads/writes).
 # SECONDARY   — verification/replica DB, written only by the sync worker.

@@ -5,12 +5,13 @@ import secrets
 from bson import ObjectId
 
 from .repository import QuotationRepository
-from .config import MONGODB_COLLECTION
+from .config import MONGODB_COLLECTION, PUBLIC_LAUNDRY_ID
 from .crypto_helper import encrypt_dict, decrypt_dict, get_search_token
 from .database.main_db import quotations_collection
 from .repositories.main_repository import bump_version, enqueue_delete, enqueue_sync
 from .services.verification_service import attach_verification_to, attach_verifications_bulk
-from .tenancy import scoped_query
+from .tenancy import laundry_match
+from .tenant_scope import current_laundry_id
 
 SENSITIVE_FIELDS = ["client_name", "quotation_title", "line_items"]
 
@@ -85,11 +86,39 @@ class MongoDBQuotationRepository(QuotationRepository):
         except Exception:
             return None
 
-    def get_by_tag(self, tag: str, laundry_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get quotations filtered by tag, scoped to a laundry when provided"""
-        documents = self.collection.find(self._scope({"tag": tag}, laundry_id)).sort(
-            "created_at", -1
-        )
+    def get_public_by_id(self, quotation_id: str) -> Optional[Dict[str, Any]]:
+        """Unauthenticated capability read for guest tracking.
+
+        The id itself is the credential (nothing enumerable), matching the
+        pre-multi-tenant behaviour. No tenant can be derived without a session.
+        """
+        try:
+            doc = self.collection.raw.find_one({"_id": ObjectId(quotation_id)})
+        except Exception:
+            return None
+        if not doc:
+            return None
+        try:
+            return self._serialize_document(doc)
+        except ValueError:
+            return None
+
+    def get_public_shop_quotations(self) -> List[Dict[str, Any]]:
+        """Guest storefront listing, limited to the public storefront tenant."""
+        documents = self.collection.raw.find(
+            {"tag": "shop", **laundry_match(PUBLIC_LAUNDRY_ID)}
+        ).sort("created_at", -1)
+        results = []
+        for doc in documents:
+            try:
+                results.append(self._serialize_document(doc))
+            except ValueError:
+                pass
+        return attach_verifications_bulk("quotation", results)
+
+    def get_by_tag(self, tag: str) -> List[Dict[str, Any]]:
+        """Get quotations filtered by tag"""
+        documents = self.collection.find({"tag": tag}).sort("created_at", -1)
         results = []
         for doc in documents:
             try:
@@ -237,6 +266,7 @@ class MongoDBQuotationRepository(QuotationRepository):
                 "quotation_id": str(quotation_id),
                 "line_item_id": lid,
                 "label": lab,
+                "laundry_id": current_laundry_id(),
                 "created_at": datetime.now(UTC),
             }
             if laundry_id is not None:
