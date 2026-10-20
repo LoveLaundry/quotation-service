@@ -61,7 +61,7 @@ def current_laundry_id() -> str:
 
 
 class TenantScopedCollection:
-    """Motor collection wrapper that injects the tenant predicate.
+    """Synchronous PyMongo collection wrapper that injects tenant predicates.
 
     Only the operations this service actually uses are intercepted; anything
     else falls through to the raw collection so unrelated behaviour (index
@@ -108,11 +108,11 @@ class TenantScopedCollection:
     def find(self, filter=None, *args, **kwargs):
         return self._collection.find(self._scope(filter), *args, **kwargs)
 
-    async def find_one(self, filter=None, *args, **kwargs):
-        return await self._collection.find_one(self._scope(filter), *args, **kwargs)
+    def find_one(self, filter=None, *args, **kwargs):
+        return self._collection.find_one(self._scope(filter), *args, **kwargs)
 
-    async def count_documents(self, filter=None, *args, **kwargs):
-        return await self._collection.count_documents(self._scope(filter), *args, **kwargs)
+    def count_documents(self, filter=None, *args, **kwargs):
+        return self._collection.count_documents(self._scope(filter), *args, **kwargs)
 
     def aggregate(self, pipeline, *args, **kwargs):
         tenant = current_laundry_id()
@@ -123,40 +123,40 @@ class TenantScopedCollection:
         return self._collection.aggregate(scoped, *args, **kwargs)
 
     # ── writes ─────────────────────────────────────────────────────────────
-    async def insert_one(self, document, *args, **kwargs):
-        return await self._collection.insert_one(self._stamp(document), *args, **kwargs)
+    def insert_one(self, document, *args, **kwargs):
+        return self._collection.insert_one(self._stamp(document), *args, **kwargs)
 
-    async def insert_many(self, documents, *args, **kwargs):
-        return await self._collection.insert_many([self._stamp(d) for d in documents], *args, **kwargs)
+    def insert_many(self, documents, *args, **kwargs):
+        return self._collection.insert_many([self._stamp(d) for d in documents], *args, **kwargs)
 
-    async def update_one(self, filter, update, *args, **kwargs):
-        return await self._collection.update_one(self._scope(filter), update, *args, **kwargs)
+    def update_one(self, filter, update, *args, **kwargs):
+        return self._collection.update_one(self._scope(filter), update, *args, **kwargs)
 
-    async def update_many(self, filter, update, *args, **kwargs):
-        return await self._collection.update_many(self._scope(filter), update, *args, **kwargs)
+    def update_many(self, filter, update, *args, **kwargs):
+        return self._collection.update_many(self._scope(filter), update, *args, **kwargs)
 
-    async def replace_one(self, filter, replacement, *args, **kwargs):
-        return await self._collection.replace_one(
+    def replace_one(self, filter, replacement, *args, **kwargs):
+        return self._collection.replace_one(
             self._scope(filter), self._stamp(replacement), *args, **kwargs
         )
 
-    async def delete_one(self, filter, *args, **kwargs):
-        return await self._collection.delete_one(self._scope(filter), *args, **kwargs)
+    def delete_one(self, filter, *args, **kwargs):
+        return self._collection.delete_one(self._scope(filter), *args, **kwargs)
 
-    async def delete_many(self, filter, *args, **kwargs):
-        return await self._collection.delete_many(self._scope(filter), *args, **kwargs)
+    def delete_many(self, filter, *args, **kwargs):
+        return self._collection.delete_many(self._scope(filter), *args, **kwargs)
 
 
-    async def find_one_and_update(self, filter, update, *args, **kwargs):
-        return await self._collection.find_one_and_update(
+    def find_one_and_update(self, filter, update, *args, **kwargs):
+        return self._collection.find_one_and_update(
             self._scope(filter), update, *args, **kwargs
         )
 
-    async def find_one_and_delete(self, filter, *args, **kwargs):
-        return await self._collection.find_one_and_delete(self._scope(filter), *args, **kwargs)
+    def find_one_and_delete(self, filter, *args, **kwargs):
+        return self._collection.find_one_and_delete(self._scope(filter), *args, **kwargs)
 
-    async def distinct(self, key, filter=None, *args, **kwargs):
-        return await self._collection.distinct(key, self._scope(filter), *args, **kwargs)
+    def distinct(self, key, filter=None, *args, **kwargs):
+        return self._collection.distinct(key, self._scope(filter), *args, **kwargs)
 
     def __getattr__(self, item):
         return getattr(self._collection, item)

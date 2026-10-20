@@ -137,6 +137,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             "quotation_title": quotation_data.get("quotation_title"),
             "line_items": quotation_data.get("line_items", []),
             "status": quotation_data.get("status", "draft"),
+            "status_history": quotation_data.get("status_history", []),
             "tag": quotation_data.get("tag", "shop"),
             "created_at": now,
             "updated_at": now,
