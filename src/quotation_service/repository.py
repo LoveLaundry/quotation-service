@@ -9,7 +9,7 @@ class QuotationRepository(ABC):
     def get_all(self) -> List[Dict[str, Any]]:
         """Get all quotations"""
         pass
-    
+
     @abstractmethod
     def get_by_id(self, quotation_id: Any) -> Optional[Dict[str, Any]]:
         """Get a quotation by ID"""

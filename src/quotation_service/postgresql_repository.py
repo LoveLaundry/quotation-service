@@ -30,7 +30,7 @@ class PostgreSQLQuotationRepository(QuotationRepository):
         """Get all quotations, sorted by created_at descending"""
         quotations = self.db.query(Quotation).order_by(Quotation.created_at.desc()).all()
         return [self._model_to_dict(q) for q in quotations]
-    
+
     def get_by_id(self, quotation_id: int) -> Optional[Dict[str, Any]]:
         """Get a quotation by ID"""
         quotation = self.db.query(Quotation).filter(Quotation.id == quotation_id).first()
