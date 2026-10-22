@@ -118,17 +118,20 @@ def owned_filter(oid, laundry_id: str) -> dict:
     return filt
 
 
-async def stamp_missing_laundry_ids(collections: Dict[str, Any], laundry_id: str = LOVE_LAUNDRY_ID) -> Dict[str, int]:
+def stamp_missing_laundry_ids(collections: Dict[str, Any], laundry_id: str = LOVE_LAUNDRY_ID) -> Dict[str, int]:
     """Backfill ``laundry_id`` on documents that predate multi-tenancy.
 
     Only documents WITHOUT the field are touched; existing values (including
     other laundries) are never rewritten. Returns per-collection counts of
     stamped documents for the reconciliation check. The operator runs this
     per collection before switching traffic, then verifies totals.
+
+    Synchronous on purpose: this service talks to MongoDB through plain
+    ``pymongo`` (not motor), so ``update_many`` returns a result directly.
     """
     stamped: Dict[str, int] = {}
     for name, collection in collections.items():
-        result = await collection.update_many(
+        result = collection.update_many(
             {"$or": [{"laundry_id": {"$exists": False}}, {"laundry_id": None}]},
             {"$set": {"laundry_id": laundry_id}},
         )
