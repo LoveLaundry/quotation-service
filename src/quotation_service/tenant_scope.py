@@ -61,15 +61,7 @@ def current_laundry_id() -> str:
 
 
 class TenantScopedCollection:
-    """pymongo collection wrapper that injects the tenant predicate.
-
-    The wrapper is **synchronous**, exactly like the collection it decorates:
-    ``database/connection_manager.py`` builds plain (non-motor) ``MongoClient``
-    instances, so every method here must return the pymongo result directly.
-    Declaring these as ``async def`` made every scoped call return an
-    un-awaited coroutine — the caller then handed that coroutine to
-    ``decrypt_dict``, which surfaced as "Failed to decrypt quotation", and
-    writes silently no-op'd.
+    """Synchronous PyMongo collection wrapper that injects tenant predicates.
 
     Only the operations this service actually uses are intercepted; anything
     else falls through to the raw collection so unrelated behaviour (index
@@ -137,6 +129,8 @@ class TenantScopedCollection:
     # ── writes ─────────────────────────────────────────────────────────────
     def insert_one(self, document, *args, **kwargs):
         return self._collection.insert_one(self._stamp(document), *args, **kwargs)
+    def insert_one(self, document, *args, **kwargs):
+        return self._collection.insert_one(self._stamp(document), *args, **kwargs)
 
     def insert_many(self, documents, *args, **kwargs):
         return self._collection.insert_many(
@@ -145,10 +139,16 @@ class TenantScopedCollection:
 
     def update_one(self, filter, update, *args, **kwargs):
         return self._collection.update_one(self._scope(filter), update, *args, **kwargs)
+    def update_one(self, filter, update, *args, **kwargs):
+        return self._collection.update_one(self._scope(filter), update, *args, **kwargs)
 
     def update_many(self, filter, update, *args, **kwargs):
         return self._collection.update_many(self._scope(filter), update, *args, **kwargs)
+    def update_many(self, filter, update, *args, **kwargs):
+        return self._collection.update_many(self._scope(filter), update, *args, **kwargs)
 
+    def replace_one(self, filter, replacement, *args, **kwargs):
+        return self._collection.replace_one(
     def replace_one(self, filter, replacement, *args, **kwargs):
         return self._collection.replace_one(
             self._scope(filter), self._stamp(replacement), *args, **kwargs
@@ -156,10 +156,17 @@ class TenantScopedCollection:
 
     def delete_one(self, filter, *args, **kwargs):
         return self._collection.delete_one(self._scope(filter), *args, **kwargs)
+    def delete_one(self, filter, *args, **kwargs):
+        return self._collection.delete_one(self._scope(filter), *args, **kwargs)
 
     def delete_many(self, filter, *args, **kwargs):
         return self._collection.delete_many(self._scope(filter), *args, **kwargs)
+    def delete_many(self, filter, *args, **kwargs):
+        return self._collection.delete_many(self._scope(filter), *args, **kwargs)
 
+
+    def find_one_and_update(self, filter, update, *args, **kwargs):
+        return self._collection.find_one_and_update(
     def find_one_and_update(self, filter, update, *args, **kwargs):
         return self._collection.find_one_and_update(
             self._scope(filter), update, *args, **kwargs
@@ -167,7 +174,11 @@ class TenantScopedCollection:
 
     def find_one_and_delete(self, filter, *args, **kwargs):
         return self._collection.find_one_and_delete(self._scope(filter), *args, **kwargs)
+    def find_one_and_delete(self, filter, *args, **kwargs):
+        return self._collection.find_one_and_delete(self._scope(filter), *args, **kwargs)
 
+    def distinct(self, key, filter=None, *args, **kwargs):
+        return self._collection.distinct(key, self._scope(filter), *args, **kwargs)
     def distinct(self, key, filter=None, *args, **kwargs):
         return self._collection.distinct(key, self._scope(filter), *args, **kwargs)
 

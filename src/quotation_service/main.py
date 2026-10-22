@@ -145,8 +145,20 @@ def startup_event():
             logger.exception("Failed to start sync worker")
 
 
+def _sqlite_column_exists(conn, table: str, column: str) -> bool:
+    rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+    return any(r[1] == column for r in rows)
+
+
 def _migrate_quotation_schema():
-    """Add status_history to existing quotation tables (create_all won't alter)."""
+    """Add new columns to existing quotation tables (create_all won't alter).
+
+    SQLAlchemy's create_all creates missing *tables* only, so a new column on
+    an existing table needs an explicit ALTER. SQLite has no ``ADD COLUMN IF
+    NOT EXISTS``, hence the PRAGMA probe. ``laundry_id`` is nullable so rows
+    written before multi-tenancy read as LoveLaundry's (the sole historical
+    tenant).
+    """
     if DB_TYPE not in (DatabaseType.POSTGRESQL, DatabaseType.SQLITE):
         return
     try:
@@ -162,13 +174,24 @@ def _migrate_quotation_schema():
                         "status_history JSON NOT NULL DEFAULT '[]'::json"
                     )
                 )
-            else:
                 conn.execute(
-                    text(
-                        "ALTER TABLE quotations ADD COLUMN IF NOT EXISTS "
-                        "status_history JSON NOT NULL DEFAULT '[]'"
-                    )
+                    text("ALTER TABLE quotations ADD COLUMN IF NOT EXISTS laundry_id VARCHAR")
                 )
+                conn.execute(
+                    text("ALTER TABLE garment_tags ADD COLUMN IF NOT EXISTS laundry_id VARCHAR")
+                )
+            else:
+                if not _sqlite_column_exists(conn, "quotations", "status_history"):
+                    conn.execute(
+                        text(
+                            "ALTER TABLE quotations ADD COLUMN "
+                            "status_history JSON NOT NULL DEFAULT '[]'"
+                        )
+                    )
+                if not _sqlite_column_exists(conn, "quotations", "laundry_id"):
+                    conn.execute(text("ALTER TABLE quotations ADD COLUMN laundry_id VARCHAR"))
+                if not _sqlite_column_exists(conn, "garment_tags", "laundry_id"):
+                    conn.execute(text("ALTER TABLE garment_tags ADD COLUMN laundry_id VARCHAR"))
         logger.info("Quotation schema migration check completed")
     except Exception:
         logger.exception("Quotation schema migration failed")
@@ -219,13 +242,15 @@ def health():
 )
 def get_all_quotations(
     tag: str | None = None,
-    repo: QuotationRepository = Depends(get_repository)
+    repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get all quotations with optional tag filtering"""
+    lid = resolve_laundry_id(current_user)
     if tag:
-        quotations = repo.get_by_tag(tag)
+        quotations = repo.get_by_tag(tag, laundry_id=lid)
     else:
-        quotations = repo.get_all()
+        quotations = repo.get_all(laundry_id=lid)
     return quotations
 
 
@@ -246,10 +271,14 @@ def get_shop_quotations_guest(repo: QuotationRepository = Depends(get_repository
 def get_quotation(
     quotation_id: Union[int, str],
     repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
 ):
     # MongoDB uses string IDs, PostgreSQL uses integers
-    quotation = repo.get_by_id(_norm_qid(quotation_id))
+    lid = resolve_laundry_id(current_user)
+    quotation = repo.get_by_id(_norm_qid(quotation_id), laundry_id=lid)
 
+    # Guard the oracle: a foreign/missing quotation is a 404, never a leak.
+    assert_same_laundry(quotation, lid, "Quotation")
     if not quotation:
         raise HTTPException(status_code=404, detail="Quotation not found")
     return quotation
@@ -268,6 +297,7 @@ def create_quotation(
 ):
     line_items_data = [item.model_dump() for item in payload.line_items]
 
+    lid = resolve_laundry_id(current_user)
     username = current_user.get("username") or current_user.get("sub")
     if payload.status not in ORDER_STATUSES:
         raise HTTPException(
@@ -291,7 +321,7 @@ def create_quotation(
         "tag": payload.tag,
     }
 
-    new_quotation = repo.create(quotation_data)
+    new_quotation = repo.create(quotation_data, laundry_id=lid)
 
     # Perform simple audit log trigger if needed
     # We will implement audit logs in the bill-service / dashboard API directly
@@ -312,7 +342,9 @@ def update_quotation(
     # Convert quotation_id based on database type
     quotation_id = _norm_qid(quotation_id)
 
-    current = repo.get_by_id(quotation_id)
+    lid = resolve_laundry_id(current_user)
+    current = repo.get_by_id(quotation_id, laundry_id=lid)
+    assert_same_laundry(current, lid, "Quotation")
     if not current:
         raise HTTPException(status_code=404, detail="Quotation not found")
 
@@ -343,7 +375,7 @@ def update_quotation(
             )
             update_data["status_history"] = hist
 
-    updated_quotation = repo.update(quotation_id, update_data)
+    updated_quotation = repo.update(quotation_id, update_data, laundry_id=lid)
 
     if not updated_quotation:
         raise HTTPException(status_code=404, detail="Quotation not found")
@@ -371,7 +403,9 @@ def advance_quotation_status(
 
     qid = _norm_qid(quotation_id)
 
-    current = repo.get_by_id(qid)
+    lid = resolve_laundry_id(current_user)
+    current = repo.get_by_id(qid, laundry_id=lid)
+    assert_same_laundry(current, lid, "Quotation")
     if not current:
         raise HTTPException(status_code=404, detail="Quotation not found")
 
@@ -394,7 +428,7 @@ def advance_quotation_status(
         }
     )
 
-    updated = repo.update(qid, {"status": payload.status, "status_history": hist})
+    updated = repo.update(qid, {"status": payload.status, "status_history": hist}, laundry_id=lid)
     if not updated:
         raise HTTPException(status_code=404, detail="Quotation not found")
     return updated
@@ -432,11 +466,16 @@ def track_quotation(
 def delete_quotation(
     quotation_id: Union[int, str],
     repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
 ):
     # Convert quotation_id based on database type
     quotation_id = _norm_qid(quotation_id)
 
-    success = repo.delete(quotation_id)
+    lid = resolve_laundry_id(current_user)
+    current = repo.get_by_id(quotation_id, laundry_id=lid)
+    assert_same_laundry(current, lid, "Quotation")
+
+    success = repo.delete(quotation_id, laundry_id=lid)
 
     if not success:
         raise HTTPException(status_code=404, detail="Quotation not found")
@@ -454,10 +493,12 @@ def create_quotation_tags(
     quotation_id: Union[int, str],
     payload: TagCreate,
     repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
 ):
     """Mint QR garment tags for an order (one per line item or N loose tags)."""
     qid = _norm_qid(quotation_id)
-    tags = repo.create_tags(qid, payload.count, payload.per_item, payload.label)
+    lid = resolve_laundry_id(current_user)
+    tags = repo.create_tags(qid, payload.count, payload.per_item, payload.label, laundry_id=lid)
     if tags is None:
         raise HTTPException(status_code=404, detail="Quotation not found")
     return TagsResponse(
@@ -485,9 +526,11 @@ def create_quotation_tags(
 def list_quotation_tags(
     quotation_id: Union[int, str],
     repo: QuotationRepository = Depends(get_repository),
+    current_user: dict = Depends(get_current_user),
 ):
     qid = _norm_qid(quotation_id)
-    tags = repo.list_tags(qid)
+    lid = resolve_laundry_id(current_user)
+    tags = repo.list_tags(qid, laundry_id=lid)
     return TagsResponse(
         quotation_id=qid,
         tags=[
@@ -508,7 +551,8 @@ def list_quotation_tags(
 @app.get("/tags/{code}")
 def lookup_tag(code: str, repo: QuotationRepository = Depends(get_repository)):
     """Public: resolve a scanned tag to its order status (no PII beyond first name)."""
-    tag = repo.get_tag(code)
+    # Public possession-based lookup — no session, deliberately unscoped.
+    tag = repo.get_tag(code, laundry_id=None)
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
     qid = tag["quotation_id"]
@@ -532,7 +576,8 @@ def lookup_tag(code: str, repo: QuotationRepository = Depends(get_repository)):
 @app.get("/tags/{code}/tracking")
 def tag_tracking(code: str, repo: QuotationRepository = Depends(get_repository)):
     """Public: order timeline for a scanned tag (same shape as /tracking)."""
-    tag = repo.get_tag(code)
+    # Public possession-based lookup — no session, deliberately unscoped.
+    tag = repo.get_tag(code, laundry_id=None)
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
     qid = tag["quotation_id"]
