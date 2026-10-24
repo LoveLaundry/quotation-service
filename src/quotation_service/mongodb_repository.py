@@ -1,6 +1,7 @@
 from .app_time import UTC
 from datetime import datetime
 from typing import List, Optional, Dict, Any
+import logging
 import secrets
 from bson import ObjectId
 
@@ -13,7 +14,16 @@ from .services.verification_service import attach_verification_to, attach_verifi
 from .tenancy import laundry_match
 from .tenant_scope import current_laundry_id
 
+logger = logging.getLogger(__name__)
+
 SENSITIVE_FIELDS = ["client_name", "quotation_title", "line_items"]
+
+# Fields that must never be part of an update payload:
+#   _id          — MongoDB rejects writes to the immutable id field.
+#   laundry_id   — owned by the tenant guard, never by the request payload.
+#   sync_version — owned by the atomic $inc in bump_version(); writing it back
+#                  would clobber a concurrent bump.
+PROTECTED_FIELDS = ("_id", "laundry_id", "sync_version")
 
 
 class MongoDBQuotationRepository(QuotationRepository):
@@ -65,12 +75,28 @@ class MongoDBQuotationRepository(QuotationRepository):
         """Get all quotations for a laundry, sorted by created_at descending"""
         documents = self.collection.find(self._scope({}, laundry_id)).sort("created_at", -1)
         results = []
+        skipped = 0
         for doc in documents:
             try:
                 serialized = self._serialize_document(doc)
                 results.append(serialized)
             except ValueError:
-                pass
+                # Never swallow this silently: a document that cannot be
+                # decrypted (wrong MASTER_KEY, missing envelope metadata or
+                # corrupted ciphertext) would otherwise make the whole listing
+                # look empty with no trace of why.
+                skipped += 1
+                logger.error(
+                    "Failed to decrypt quotation %s: %s",
+                    doc.get("_id"),
+                    exc_info=True,
+                )
+        if skipped:
+            logger.error(
+                "%s of %s quotations could not be decrypted and were omitted",
+                skipped,
+                skipped + len(results),
+            )
         return attach_verifications_bulk("quotation", results)
 
     def get_by_id(self, quotation_id: str, laundry_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -82,9 +108,10 @@ class MongoDBQuotationRepository(QuotationRepository):
             if not doc:
                 return None
             serialized = self._serialize_document(doc)
-            return attach_verification_to("quotation", doc["_id"], serialized)
-        except Exception:
+        except ValueError:
+            logger.error("Failed to decrypt quotation %s", quotation_id, exc_info=True)
             return None
+        return attach_verification_to("quotation", doc["_id"], serialized)
 
     def get_public_by_id(self, quotation_id: str) -> Optional[Dict[str, Any]]:
         """Unauthenticated capability read for guest tracking.
@@ -101,6 +128,7 @@ class MongoDBQuotationRepository(QuotationRepository):
         try:
             return self._serialize_document(doc)
         except ValueError:
+            logger.error("Failed to decrypt quotation %s", quotation_id, exc_info=True)
             return None
 
     def get_public_shop_quotations(self) -> List[Dict[str, Any]]:
@@ -113,7 +141,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             try:
                 results.append(self._serialize_document(doc))
             except ValueError:
-                pass
+                logger.error("Failed to decrypt quotation %s", doc.get("_id"), exc_info=True)
         return attach_verifications_bulk("quotation", results)
 
     def get_by_tag(self, tag: str) -> List[Dict[str, Any]]:
@@ -125,7 +153,7 @@ class MongoDBQuotationRepository(QuotationRepository):
                 serialized = self._serialize_document(doc)
                 results.append(serialized)
             except ValueError:
-                pass
+                logger.error("Failed to decrypt quotation %s", doc.get("_id"), exc_info=True)
         return attach_verifications_bulk("quotation", results)
 
     def create(self, quotation_data: Dict[str, Any], laundry_id: Optional[str] = None) -> Dict[str, Any]:
@@ -137,6 +165,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             "quotation_title": quotation_data.get("quotation_title"),
             "line_items": quotation_data.get("line_items", []),
             "status": quotation_data.get("status", "draft"),
+            "status_history": quotation_data.get("status_history", []),
             "tag": quotation_data.get("tag", "shop"),
             "created_at": now,
             "updated_at": now,
@@ -171,6 +200,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             try:
                 decrypted_original = self.decrypt_document_full(original)
             except Exception:
+                logger.error("Failed to decrypt quotation %s", quotation_id, exc_info=True)
                 return None
 
             # Merge updates
@@ -180,6 +210,15 @@ class MongoDBQuotationRepository(QuotationRepository):
 
             # Encrypt new state
             encrypted_new = encrypt_dict(decrypted_original, SENSITIVE_FIELDS)
+
+            # `_id` is immutable in MongoDB and `laundry_id` / `sync_version`
+            # are owned by the tenant guard and the version bump. Including
+            # them in `$set` makes MongoDB reject the whole update.
+            payload = {
+                key: val
+                for key, val in encrypted_new.items()
+                if key not in PROTECTED_FIELDS
+            }
 
             result = self.collection.find_one_and_update(
                 scoped,
@@ -191,12 +230,13 @@ class MongoDBQuotationRepository(QuotationRepository):
                 return None
 
             # Main DB write succeeded -> bump version and enqueue replication
-            new_version = bump_version("quotation", ObjectId(quotation_id))
-            enqueue_sync("quotation", ObjectId(quotation_id), new_version)
+            new_version = bump_version("quotation", oid)
+            enqueue_sync("quotation", oid, new_version)
 
             serialized = self._serialize_document(result)
-            return attach_verification_to("quotation", ObjectId(quotation_id), serialized)
+            return attach_verification_to("quotation", oid, serialized)
         except Exception:
+            logger.exception("Failed to update quotation %s", quotation_id)
             return None
 
     def delete(self, quotation_id: str, laundry_id: Optional[str] = None) -> bool:
@@ -220,6 +260,7 @@ class MongoDBQuotationRepository(QuotationRepository):
             enqueue_delete("quotation", oid, new_version)
             return True
         except Exception:
+            logger.exception("Failed to delete quotation %s", quotation_id)
             return False
 
     def close(self):

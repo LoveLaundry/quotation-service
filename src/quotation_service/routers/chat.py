@@ -20,11 +20,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..auth_helper import get_current_user, require_role
 from ..crypto_helper import decrypt_dict, encrypt_dict
 from ..database.main_db import chat_collection, chat_messages_collection
+from ..tenant_scope import TenantScopedCollection
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -37,6 +38,27 @@ BOT_FALLBACK = "Thank you for your message. Our team will get back to you shortl
 
 SENSITIVE_CONV = ["guest_name", "participants"]
 SENSITIVE_MSG = ["text"]
+
+# Bounds on guest-supplied content. The reverse proxy caps the request body,
+# but a 25 MB chat message would still be encrypted and stored per message,
+# so the payload is capped at the edge as well.
+MAX_MESSAGE_CHARS = 4000
+MAX_NAME_CHARS = 120
+MAX_TITLE_CHARS = 200
+MAX_PARTICIPANTS = 50
+
+# Guest-facing routes run without a session, so they cannot resolve a tenant
+# and must use the raw collection (the unguessable conversation id is the
+# credential). ADMIN routes do have a session, so they read and write through
+# the tenant-scoped handle — otherwise an admin of one laundry could list and
+# read the guest conversations (names, messages) of another laundry.
+def _admin_chat_collection() -> TenantScopedCollection:
+    """Tenant-scoped view of the chat conversations for the current session.
+
+    Built per call so it always wraps the collection the module currently
+    uses (tests swap the collection out).
+    """
+    return TenantScopedCollection(chat_collection, "chat_conversations")
 
 
 def _now() -> datetime:
@@ -94,6 +116,16 @@ def _decrypt_message(raw: dict) -> dict:
 
 def _get_conversation_raw(conversation_id: str) -> Optional[dict]:
     return chat_collection.find_one({"_id": conversation_id})
+
+
+def _admin_get_conversation_raw(conversation_id: str) -> Optional[dict]:
+    """Tenant-scoped lookup for the admin routes.
+
+    The admin session resolves to exactly one laundry, so the conversation
+    must belong to it. Unstamped (pre-multi-tenancy) conversations read as
+    LoveLaundry's, which is the only tenant that ever owned them.
+    """
+    return _admin_chat_collection().find_one({"_id": conversation_id})
 
 
 def _decrypt_conversation(raw: dict) -> dict:
@@ -192,12 +224,12 @@ def _call_bot(message: str, lang: str = "en") -> str:
 
 # ── Public endpoints (no auth) ───────────────────────────────────────────────
 class GuestMessageIn(BaseModel):
-    message: str
-    guest_id: str
-    lang: str = "en"
-    name: Optional[str] = None
-    participants: Optional[list] = None
-    title: Optional[str] = None
+    message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_CHARS)
+    guest_id: str = Field(..., min_length=1, max_length=128)
+    lang: str = Field("en", max_length=16)
+    name: Optional[str] = Field(None, max_length=MAX_NAME_CHARS)
+    participants: Optional[list] = Field(None, max_length=MAX_PARTICIPANTS)
+    title: Optional[str] = Field(None, max_length=MAX_TITLE_CHARS)
 
 
 @router.post("/conversations/{conversation_id}/messages")
@@ -271,6 +303,8 @@ def add_participant(
     name = body.get("name")
     if not guest_id or not name:
         raise HTTPException(status_code=400, detail="guest_id and name are required")
+    if len(str(guest_id)) > 128 or len(str(name)) > MAX_NAME_CHARS:
+        raise HTTPException(status_code=400, detail="guest_id or name is too long")
 
     raw = _get_conversation_raw(conversation_id)
     if not raw:
@@ -350,7 +384,7 @@ def admin_list_conversations(
     filt: dict = {}
     if status:
         filt["status"] = status
-    raws = list(chat_collection.find(filt).sort("updated_at", -1).limit(limit))
+    raws = list(_admin_chat_collection().find(filt).sort("updated_at", -1).limit(limit))
     result = []
     for raw in raws:
         conv = _decrypt_conversation(raw)
@@ -376,7 +410,7 @@ def admin_list_conversations(
     dependencies=[Depends(require_role(["ADMIN", "MANAGER"]))],
 )
 def admin_get_conversation(conversation_id: str):
-    raw = _get_conversation_raw(conversation_id)
+    raw = _admin_get_conversation_raw(conversation_id)
     if not raw:
         raise HTTPException(status_code=404, detail="Conversation not found")
     conv = _decrypt_conversation(raw)
@@ -384,7 +418,7 @@ def admin_get_conversation(conversation_id: str):
 
 
 class AdminMessageIn(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1, max_length=MAX_MESSAGE_CHARS)
 
 
 @router.post(
@@ -396,7 +430,7 @@ def admin_post_message(
     body: AdminMessageIn,
     current_user: dict = Depends(get_current_user),
 ):
-    raw = _get_conversation_raw(conversation_id)
+    raw = _admin_get_conversation_raw(conversation_id)
     if not raw:
         raise HTTPException(status_code=404, detail="Conversation not found")
     sender_name = (
@@ -406,19 +440,19 @@ def admin_post_message(
         or "Admin"
     )
     _insert_message(conversation_id, _new_message("admin", body.text, sender_name))
-    chat_collection.update_one(
+    _admin_chat_collection().update_one(
         {"_id": conversation_id},
         {"$set": {"assigned_admin_name": sender_name, "updated_at": _now()}},
     )
-    conv = _decrypt_conversation(_get_conversation_raw(conversation_id))
+    conv = _decrypt_conversation(_admin_get_conversation_raw(conversation_id))
     return {**conv, "messages": _messages_for(conversation_id)}
 
 
 class AdminUpdateIn(BaseModel):
-    status: Optional[str] = None
-    guest_name: Optional[str] = None
-    assigned_admin_name: Optional[str] = None
-    title: Optional[str] = None
+    status: Optional[str] = Field(None, max_length=64)
+    guest_name: Optional[str] = Field(None, max_length=MAX_NAME_CHARS)
+    assigned_admin_name: Optional[str] = Field(None, max_length=MAX_NAME_CHARS)
+    title: Optional[str] = Field(None, max_length=MAX_TITLE_CHARS)
 
 
 @router.patch(
@@ -426,7 +460,7 @@ class AdminUpdateIn(BaseModel):
     dependencies=[Depends(require_role(["ADMIN", "MANAGER"]))],
 )
 def admin_update_conversation(conversation_id: str, body: AdminUpdateIn):
-    raw = _get_conversation_raw(conversation_id)
+    raw = _admin_get_conversation_raw(conversation_id)
     if not raw:
         raise HTTPException(status_code=404, detail="Conversation not found")
     dec = decrypt_dict(raw, SENSITIVE_CONV)
@@ -440,6 +474,6 @@ def admin_update_conversation(conversation_id: str, body: AdminUpdateIn):
         dec["status"] = body.status
     dec["updated_at"] = _now()
     new_doc = encrypt_dict(dec, SENSITIVE_CONV)
-    chat_collection.replace_one({"_id": conversation_id}, new_doc)
-    conv = _decrypt_conversation(_get_conversation_raw(conversation_id))
+    _admin_chat_collection().replace_one({"_id": conversation_id}, new_doc)
+    conv = _decrypt_conversation(_admin_get_conversation_raw(conversation_id))
     return {**conv, "messages": _messages_for(conversation_id)}

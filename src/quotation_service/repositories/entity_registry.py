@@ -2,6 +2,12 @@
 Entity registry — maps business entity names to their collections in each
 database role. This is the single place that knows which collections
 participate in synchronization.
+
+These are **system-level** handles, not request-scoped business handles: the
+background sync worker runs in a thread with no JWT claims, and the MAIN->LOCAL
+replica diff deliberately spans every tenant. Reaching them through the
+tenant-scoped collection would fail closed (no tenant to resolve) or silently
+replicate only one laundry, so the raw MAIN collection is used here.
 """
 from pymongo.collection import Collection
 from bson import ObjectId
@@ -11,7 +17,7 @@ from ..database import local_db, main_db, secondary_db
 # entity name -> (MAIN collection, SECONDARY collection, LOCAL collection)
 COLLECTION_MAP: dict[str, tuple[Collection, Collection, Collection]] = {
     "quotation": (
-        main_db.quotations_collection,
+        main_db.raw_quotations_collection,
         secondary_db.quotations_collection,
         local_db.quotations_collection,
     ),

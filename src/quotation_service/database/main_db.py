@@ -11,7 +11,11 @@ from .connection_manager import ROLE_MAIN, get_database
 
 _db = get_database(ROLE_MAIN)
 
-quotations_collection: Collection = _db.get_collection("quotations")
+# Raw (unscoped) handle on the quotations collection. Business code must use
+# the tenant-scoped `quotations_collection` below; system-level code (the
+# background sync worker, the version bump, the MAIN->LOCAL replica diff) has
+# no request claims, so resolving a tenant there would fail closed.
+raw_quotations_collection: Collection = _db.get_collection("quotations")
 
 # Sync infrastructure collections live alongside business data in MAIN.
 sync_status_collection: Collection = _db.get_collection("sync_status")
@@ -26,9 +30,9 @@ chat_messages_collection: Collection = _db.get_collection("chat_messages")
 def ensure_indexes():
     """Create all required indexes on the MAIN database."""
     # Quotations indexes
-    quotations_collection.create_index("client_name_search")
-    quotations_collection.create_index("created_at")
-    quotations_collection.create_index("tag")
+    raw_quotations_collection.create_index("client_name_search")
+    raw_quotations_collection.create_index("created_at")
+    raw_quotations_collection.create_index("tag")
 
     # Sync infrastructure indexes
     sync_status_collection.create_index([("entity", 1), ("record_id", 1)], unique=True)
@@ -47,4 +51,4 @@ def ensure_indexes():
 # forget: the guard is the only way to reach the data.
 from ..tenant_scope import TenantScopedCollection as _TenantScopedCollection  # noqa: E402
 
-quotations_collection = _TenantScopedCollection(quotations_collection, "quotations")
+quotations_collection = _TenantScopedCollection(raw_quotations_collection, "quotations")

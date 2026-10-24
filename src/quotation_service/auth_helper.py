@@ -4,6 +4,13 @@ from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer
 import jwt
 
+from dotenv import load_dotenv
+
+# Same reasoning as crypto_helper: the secret must be resolvable whatever the
+# import order is, otherwise the service either refuses to start or — worse —
+# verifies tokens with a different key than the one that issued them.
+load_dotenv()
+
 _jwt_secret = os.getenv("JWT_SECRET")
 if not _jwt_secret:
     raise RuntimeError("FATAL: JWT_SECRET environment variable is not set. Refusing to start.")
