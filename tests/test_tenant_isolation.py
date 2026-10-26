@@ -126,6 +126,11 @@ def test_assert_same_laundry_404s_across_tenants():
 def repo(monkeypatch):
     client = mongomock.MongoClient()
     coll = client.get_database("test").get_collection("quotations")
+    # These tests drive the repository with an explicit laundry_id instead of a
+    # request context, so the collection is left unwrapped. mongomock resolves any
+    # unknown attribute to a *new sub-collection*, so ``.raw`` would silently point
+    # at an empty ``quotations.raw``; alias it back to the seeded data.
+    coll.raw = coll
     monkeypatch.setattr(repo_mod, "quotations_collection", coll)
     # The repository's write path normally touches the sync/verification
     # infrastructure; stub it so the unit test stays in-memory.
@@ -217,6 +222,7 @@ def test_tags_are_scoped_and_stamped(repo):
 def api(monkeypatch):
     client = mongomock.MongoClient()
     coll = client.get_database("test").get_collection("quotations")
+    coll.raw = coll  # see the ``repo`` fixture: mongomock would invent quotations.raw
     monkeypatch.setattr(repo_mod, "quotations_collection", coll)
     monkeypatch.setattr(repo_mod, "bump_version", lambda *a, **k: 1)
     monkeypatch.setattr(repo_mod, "enqueue_sync", lambda *a, **k: None)
@@ -264,9 +270,33 @@ def test_endpoint_cross_tenant_is_404_and_guest_tag_lookup_works(api):
     assert guest.json()["quotation_id"] == own["id"]
 
 
-def test_endpoint_guest_shop_route_is_unscoped(api):
+def test_endpoint_tagged_listing_is_scoped_and_does_not_500(api):
+    """``GET /quotations?tag=…`` must reach the repository with the tenant.
+
+    The Mongo repository's ``get_by_tag`` once lacked the ``laundry_id`` parameter
+    that the route (and the abstract interface) passes, so every tagged listing
+    raised TypeError -> 500.
+    """
+    client, repo = api
+    _create(repo, LAUNDRY_A, "own")
+    _create(repo, LAUNDRY_B, "foreign")
+    r = client.get("/quotations", params={"tag": "shop"})
+    assert r.status_code == 200
+    assert {q["quotation_title"] for q in r.json()} == {"own"}
+
+
+def test_endpoint_guest_shop_excludes_foreign_laundry(api):
+    """The unauthenticated shop feed only serves the configured public laundry.
+
+    This test used to assert the opposite (every tenant's shop quotations visible
+    to any anonymous visitor). That expectation pre-dates 0d74dc6, "restore public
+    guest reads under fail-closed tenancy": the quotation payload carries the
+    client name and order title, so a tenant-wide public listing is a cross-tenant
+    leak. test_public_guest_access.py pins the same contract.
+    """
     client, repo = api
     _create(repo, LAUNDRY_B, "shop-foreign")
+    _create(repo, LOVE_LAUNDRY_ID, "shop-public")
     r = client.get("/quotations/guest/shop")
     assert r.status_code == 200
-    assert {q["quotation_title"] for q in r.json()} == {"shop-foreign"}
+    assert {q["quotation_title"] for q in r.json()} == {"shop-public"}

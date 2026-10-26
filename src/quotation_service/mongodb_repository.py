@@ -11,7 +11,7 @@ from .crypto_helper import encrypt_dict, decrypt_dict, get_search_token
 from .database.main_db import quotations_collection
 from .repositories.main_repository import bump_version, enqueue_delete, enqueue_sync
 from .services.verification_service import attach_verification_to, attach_verifications_bulk
-from .tenancy import laundry_match
+from .tenancy import laundry_match, scoped_query
 from .tenant_scope import current_laundry_id
 
 logger = logging.getLogger(__name__)
@@ -144,9 +144,9 @@ class MongoDBQuotationRepository(QuotationRepository):
                 logger.error("Failed to decrypt quotation %s", doc.get("_id"), exc_info=True)
         return attach_verifications_bulk("quotation", results)
 
-    def get_by_tag(self, tag: str) -> List[Dict[str, Any]]:
-        """Get quotations filtered by tag"""
-        documents = self.collection.find({"tag": tag}).sort("created_at", -1)
+    def get_by_tag(self, tag: str, laundry_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get quotations filtered by tag, scoped to a laundry when provided"""
+        documents = self.collection.find(self._scope({"tag": tag}, laundry_id)).sort("created_at", -1)
         results = []
         for doc in documents:
             try:
@@ -191,7 +191,8 @@ class MongoDBQuotationRepository(QuotationRepository):
     ) -> Optional[Dict[str, Any]]:
         """Update an existing quotation, scoped to a laundry when provided"""
         try:
-            scoped = self._scope({"_id": ObjectId(quotation_id)}, laundry_id)
+            oid = ObjectId(quotation_id)
+            scoped = self._scope({"_id": oid}, laundry_id)
             # We need to fetch original document first to merge and encrypt properly
             original = self.collection.find_one(scoped)
             if not original:
@@ -222,7 +223,7 @@ class MongoDBQuotationRepository(QuotationRepository):
 
             result = self.collection.find_one_and_update(
                 scoped,
-                {"$set": encrypted_new},
+                {"$set": payload},
                 return_document=True,
             )
 
@@ -300,6 +301,11 @@ class MongoDBQuotationRepository(QuotationRepository):
             for _ in range(max(1, int(count or 1))):
                 specs.append((None, label))
         created: List[Dict[str, Any]] = []
+        # garment_tags is reached through the raw collection (see _tags), so the
+        # tenant must be stamped here. An explicit laundry_id wins; only fall
+        # back to the request context when the caller did not name one, because
+        # current_laundry_id() raises for system/background callers.
+        tenant = laundry_id if laundry_id is not None else current_laundry_id()
         for lid, lab in specs:
             code = self._gen_tag_code()
             doc = {
@@ -307,11 +313,9 @@ class MongoDBQuotationRepository(QuotationRepository):
                 "quotation_id": str(quotation_id),
                 "line_item_id": lid,
                 "label": lab,
-                "laundry_id": current_laundry_id(),
+                "laundry_id": tenant,
                 "created_at": datetime.now(UTC),
             }
-            if laundry_id is not None:
-                doc["laundry_id"] = laundry_id
             self._tags.insert_one(doc)
             doc["id"] = str(doc.pop("_id"))
             created.append(doc)
