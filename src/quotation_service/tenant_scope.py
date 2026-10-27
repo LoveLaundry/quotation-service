@@ -129,8 +129,6 @@ class TenantScopedCollection:
     # ── writes ─────────────────────────────────────────────────────────────
     def insert_one(self, document, *args, **kwargs):
         return self._collection.insert_one(self._stamp(document), *args, **kwargs)
-    def insert_one(self, document, *args, **kwargs):
-        return self._collection.insert_one(self._stamp(document), *args, **kwargs)
 
     def insert_many(self, documents, *args, **kwargs):
         return self._collection.insert_many(
@@ -139,16 +137,10 @@ class TenantScopedCollection:
 
     def update_one(self, filter, update, *args, **kwargs):
         return self._collection.update_one(self._scope(filter), update, *args, **kwargs)
-    def update_one(self, filter, update, *args, **kwargs):
-        return self._collection.update_one(self._scope(filter), update, *args, **kwargs)
 
     def update_many(self, filter, update, *args, **kwargs):
         return self._collection.update_many(self._scope(filter), update, *args, **kwargs)
-    def update_many(self, filter, update, *args, **kwargs):
-        return self._collection.update_many(self._scope(filter), update, *args, **kwargs)
 
-    def replace_one(self, filter, replacement, *args, **kwargs):
-        return self._collection.replace_one(
     def replace_one(self, filter, replacement, *args, **kwargs):
         return self._collection.replace_one(
             self._scope(filter), self._stamp(replacement), *args, **kwargs
@@ -156,17 +148,10 @@ class TenantScopedCollection:
 
     def delete_one(self, filter, *args, **kwargs):
         return self._collection.delete_one(self._scope(filter), *args, **kwargs)
-    def delete_one(self, filter, *args, **kwargs):
-        return self._collection.delete_one(self._scope(filter), *args, **kwargs)
 
     def delete_many(self, filter, *args, **kwargs):
         return self._collection.delete_many(self._scope(filter), *args, **kwargs)
-    def delete_many(self, filter, *args, **kwargs):
-        return self._collection.delete_many(self._scope(filter), *args, **kwargs)
 
-
-    def find_one_and_update(self, filter, update, *args, **kwargs):
-        return self._collection.find_one_and_update(
     def find_one_and_update(self, filter, update, *args, **kwargs):
         return self._collection.find_one_and_update(
             self._scope(filter), update, *args, **kwargs
@@ -174,11 +159,7 @@ class TenantScopedCollection:
 
     def find_one_and_delete(self, filter, *args, **kwargs):
         return self._collection.find_one_and_delete(self._scope(filter), *args, **kwargs)
-    def find_one_and_delete(self, filter, *args, **kwargs):
-        return self._collection.find_one_and_delete(self._scope(filter), *args, **kwargs)
 
-    def distinct(self, key, filter=None, *args, **kwargs):
-        return self._collection.distinct(key, self._scope(filter), *args, **kwargs)
     def distinct(self, key, filter=None, *args, **kwargs):
         return self._collection.distinct(key, self._scope(filter), *args, **kwargs)
 

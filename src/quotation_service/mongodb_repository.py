@@ -1,4 +1,4 @@
-from .app_time import UTC
+﻿from .app_time import UTC
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 import logging
@@ -11,8 +11,8 @@ from .crypto_helper import encrypt_dict, decrypt_dict, get_search_token
 from .database.main_db import quotations_collection
 from .repositories.main_repository import bump_version, enqueue_delete, enqueue_sync
 from .services.verification_service import attach_verification_to, attach_verifications_bulk
-from .tenancy import laundry_match
-from .tenant_scope import current_laundry_id
+from .tenancy import laundry_match, scoped_query
+from .tenant_scope import TenantScopedCollection, current_laundry_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,19 @@ class MongoDBQuotationRepository(QuotationRepository):
         self.collection.create_index("client_name_search")
         self.collection.create_index("created_at")
         self.collection.create_index("tag")
+
+    @property
+    def _raw(self):
+        """Unscoped handle for capability-based public reads.
+
+        The repository normally receives a ``TenantScopedCollection``; its
+        ``.raw`` bypasses the tenant predicate for endpoints whose credential
+        is the unguessable id/tag code. A plain collection (tests,
+        single-tenant deployments) is already unscoped and is returned as-is.
+        """
+        if isinstance(self.collection, TenantScopedCollection):
+            return self.collection.raw
+        return self.collection
 
     def _scope(self, query: Optional[Dict[str, Any]], laundry_id: Optional[str]) -> Dict[str, Any]:
         """Merge a business filter with the tenant scope.
@@ -120,7 +133,7 @@ class MongoDBQuotationRepository(QuotationRepository):
         pre-multi-tenant behaviour. No tenant can be derived without a session.
         """
         try:
-            doc = self.collection.raw.find_one({"_id": ObjectId(quotation_id)})
+            doc = self._raw.find_one({"_id": ObjectId(quotation_id)})
         except Exception:
             return None
         if not doc:
@@ -133,7 +146,7 @@ class MongoDBQuotationRepository(QuotationRepository):
 
     def get_public_shop_quotations(self) -> List[Dict[str, Any]]:
         """Guest storefront listing, limited to the public storefront tenant."""
-        documents = self.collection.raw.find(
+        documents = self._raw.find(
             {"tag": "shop", **laundry_match(PUBLIC_LAUNDRY_ID)}
         ).sort("created_at", -1)
         results = []
@@ -191,7 +204,8 @@ class MongoDBQuotationRepository(QuotationRepository):
     ) -> Optional[Dict[str, Any]]:
         """Update an existing quotation, scoped to a laundry when provided"""
         try:
-            scoped = self._scope({"_id": ObjectId(quotation_id)}, laundry_id)
+            quotation_oid = ObjectId(quotation_id)
+            scoped = self._scope({"_id": quotation_oid}, laundry_id)
             # We need to fetch original document first to merge and encrypt properly
             original = self.collection.find_one(scoped)
             if not original:
@@ -222,7 +236,7 @@ class MongoDBQuotationRepository(QuotationRepository):
 
             result = self.collection.find_one_and_update(
                 scoped,
-                {"$set": encrypted_new},
+                {"$set": payload},
                 return_document=True,
             )
 
@@ -230,11 +244,11 @@ class MongoDBQuotationRepository(QuotationRepository):
                 return None
 
             # Main DB write succeeded -> bump version and enqueue replication
-            new_version = bump_version("quotation", oid)
-            enqueue_sync("quotation", oid, new_version)
+            new_version = bump_version("quotation", quotation_oid)
+            enqueue_sync("quotation", quotation_oid, new_version)
 
             serialized = self._serialize_document(result)
-            return attach_verification_to("quotation", oid, serialized)
+            return attach_verification_to("quotation", quotation_oid, serialized)
         except Exception:
             logger.exception("Failed to update quotation %s", quotation_id)
             return None
@@ -300,6 +314,9 @@ class MongoDBQuotationRepository(QuotationRepository):
             for _ in range(max(1, int(count or 1))):
                 specs.append((None, label))
         created: List[Dict[str, Any]] = []
+        # Resolve the stamp once: an explicit tenant (system/background caller)
+        # must not require a request session, which would raise 401 off-request.
+        stamp = laundry_id if laundry_id is not None else current_laundry_id()
         for lid, lab in specs:
             code = self._gen_tag_code()
             doc = {
@@ -307,11 +324,9 @@ class MongoDBQuotationRepository(QuotationRepository):
                 "quotation_id": str(quotation_id),
                 "line_item_id": lid,
                 "label": lab,
-                "laundry_id": current_laundry_id(),
+                "laundry_id": stamp,
                 "created_at": datetime.now(UTC),
             }
-            if laundry_id is not None:
-                doc["laundry_id"] = laundry_id
             self._tags.insert_one(doc)
             doc["id"] = str(doc.pop("_id"))
             created.append(doc)

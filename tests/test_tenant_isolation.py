@@ -21,6 +21,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from quotation_service import mongodb_repository as repo_mod
+from quotation_service.config import PUBLIC_LAUNDRY_ID
 from quotation_service.mongodb_repository import MongoDBQuotationRepository
 from quotation_service.tenancy import (
     LOVE_LAUNDRY_ID,
@@ -264,9 +265,26 @@ def test_endpoint_cross_tenant_is_404_and_guest_tag_lookup_works(api):
     assert guest.json()["quotation_id"] == own["id"]
 
 
-def test_endpoint_guest_shop_route_is_unscoped(api):
+def test_endpoint_guest_shop_route_is_scoped_to_the_public_storefront(api):
+    """The storefront is public but not cross-tenant.
+
+    ``PUBLIC_LAUNDRY_ID`` names the one laundry whose shop quotations are
+    published; a guest may read those without a session, but a foreign
+    tenant's shop rows (which carry client PII) must never be listed here.
+    Pre-tenancy rows have no ``laundry_id`` and belong to the historical
+    tenant, so they stay visible.
+    """
     client, repo = api
     _create(repo, LAUNDRY_B, "shop-foreign")
+    _create(repo, PUBLIC_LAUNDRY_ID, "shop-public")
+    _create(repo, None, "shop-legacy")
+    repo.create(
+        {"client_name": "Client", "quotation_title": "hotel-public", "line_items": [], "tag": "hotel"},
+        laundry_id=PUBLIC_LAUNDRY_ID,
+    )
+
     r = client.get("/quotations/guest/shop")
     assert r.status_code == 200
-    assert {q["quotation_title"] for q in r.json()} == {"shop-foreign"}
+    titles = {q["quotation_title"] for q in r.json()}
+    assert titles == {"shop-public", "shop-legacy"}
+    assert "shop-foreign" not in titles
