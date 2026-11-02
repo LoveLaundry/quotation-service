@@ -35,6 +35,8 @@ class PostgreSQLQuotationRepository(QuotationRepository):
             "status": quotation.status,
             "status_history": quotation.status_history or [],
             "tag": quotation.tag,
+            "hotel_id": getattr(quotation, "hotel_id", None),
+            "shop_id": getattr(quotation, "shop_id", None),
             "laundry_id": quotation.laundry_id,
             "created_at": quotation.created_at,
             "updated_at": quotation.updated_at,
@@ -72,7 +74,9 @@ class PostgreSQLQuotationRepository(QuotationRepository):
         """Public storefront listing for the configured public laundry."""
         return self.get_by_tag("shop")
     
-    def create(self, quotation_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create(
+        self, quotation_data: Dict[str, Any], laundry_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Create a new quotation"""
         new_quotation = Quotation(
             client_name=quotation_data["client_name"],
@@ -81,6 +85,8 @@ class PostgreSQLQuotationRepository(QuotationRepository):
             status=quotation_data.get("status", "draft"),
             status_history=quotation_data.get("status_history", []),
             tag=quotation_data.get("tag", "shop"),
+            hotel_id=quotation_data.get("hotel_id") or None,
+            shop_id=quotation_data.get("shop_id") or None,
             laundry_id=laundry_id,
         )
 

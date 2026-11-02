@@ -26,6 +26,13 @@ sync_logs_collection: Collection = _db.get_collection("sync_logs")
 chat_collection: Collection = _db.get_collection("chat_conversations")
 chat_messages_collection: Collection = _db.get_collection("chat_messages")
 
+# Hotel / shop entity registries, owned by user-service in the same MAIN
+# database. Read-only here: a quotation may only name an entity that exists in
+# its own laundry, which is checked before the record is written. This service
+# never creates or mutates an entity.
+hotels_collection: Collection = _db.get_collection("hotels")
+shops_collection: Collection = _db.get_collection("shops")
+
 
 def ensure_indexes():
     """Create all required indexes on the MAIN database."""

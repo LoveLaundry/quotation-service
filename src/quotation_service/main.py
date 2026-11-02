@@ -22,7 +22,7 @@ from .schemas import (
 from .auth_helper import get_current_user, require_role
 from .security import apply_security
 from .tenant_scope import TenantClaimsMiddleware, insecure_flags
-from .tenancy import assert_same_laundry, resolve_laundry_id
+from .tenancy import assert_same_laundry, resolve_laundry_id, validate_entity_association
 from .database.main_db import ensure_indexes
 from .database.connection_manager import close_all
 from .routers.admin_database import router as admin_database_router
@@ -306,6 +306,13 @@ def create_quotation(
             detail=f"Status must be one of {ORDER_STATUSES}",
         )
 
+    entity = validate_entity_association(
+        tag=payload.tag,
+        hotel_id=payload.hotel_id,
+        shop_id=payload.shop_id,
+        laundry_id=lid,
+    )
+
     quotation_data = {
         "client_name": payload.client_name,
         "quotation_title": payload.quotation_title,
@@ -320,6 +327,7 @@ def create_quotation(
             }
         ],
         "tag": payload.tag,
+        **entity,
     }
 
     new_quotation = repo.create(quotation_data, laundry_id=lid)
@@ -350,6 +358,47 @@ def update_quotation(
         raise HTTPException(status_code=404, detail="Quotation not found")
 
     update_data = payload.model_dump(exclude_unset=True)
+
+    # Re-validate the entity association whenever the tag or an entity id is
+    # being changed.
+    if {"tag", "hotel_id", "shop_id"} & set(update_data):
+        old_tag = str(current.get("tag") or "shop").strip().lower()
+        new_tag = str(update_data.get("tag") or old_tag).strip().lower()
+        tag_changed = new_tag != old_tag
+
+        # An id supplied in THIS request, as opposed to one inherited from the
+        # stored record. `key in update_data` distinguishes "not sent" from
+        # "sent as null", which is how a caller clears an association.
+        request_hotel = update_data.get("hotel_id")
+        request_shop = update_data.get("shop_id")
+        entity_supplied = bool(
+            ("hotel_id" in update_data and request_hotel)
+            or ("shop_id" in update_data and request_shop)
+        )
+
+        if tag_changed and not entity_supplied:
+            # The stored association belongs to the old side and cannot survive
+            # a side change. Clearing beats rejecting: flipping a mis-tagged
+            # quotation is a legitimate correction.
+            update_data["hotel_id"] = None
+            update_data["shop_id"] = None
+        else:
+            entity = validate_entity_association(
+                tag=new_tag,
+                hotel_id=request_hotel
+                if "hotel_id" in update_data
+                else current.get("hotel_id"),
+                shop_id=request_shop
+                if "shop_id" in update_data
+                else current.get("shop_id"),
+                laundry_id=lid,
+            )
+            # Write both fields so the abandoned side is cleared rather than
+            # left stale beside the new association.
+            update_data["hotel_id"] = entity.get("hotel_id")
+            update_data["shop_id"] = entity.get("shop_id")
+
+        update_data["tag"] = new_tag
 
     if "line_items" in update_data and update_data["line_items"]:
         update_data["line_items"] = [

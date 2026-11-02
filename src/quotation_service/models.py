@@ -14,6 +14,10 @@ class Quotation(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="draft")
     status_history: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     tag: Mapped[str] = mapped_column(String, nullable=False, default="shop", index=True)
+    # Entity association. At most one is set, matching `tag`; nullable because a
+    # quotation may be written for a walk-in customer that has no registry entry.
+    hotel_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    shop_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     # Tenant owner. Nullable so pre-tenancy rows stay valid; they read as
     # LoveLaundry's (see tenancy.laundry_match).
     laundry_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)

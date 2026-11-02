@@ -183,6 +183,12 @@ class MongoDBQuotationRepository(QuotationRepository):
             "created_at": now,
             "updated_at": now,
         }
+        # Entity association, only when the caller resolved one. Absent keys stay
+        # absent rather than becoming nulls, so existing queries are unaffected.
+        for field in ("hotel_id", "shop_id"):
+            value = quotation_data.get(field)
+            if value:
+                document[field] = value
         if laundry_id is not None:
             document["laundry_id"] = laundry_id
 

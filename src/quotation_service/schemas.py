@@ -65,6 +65,11 @@ class QuotationCreate(BaseModel):
     line_items: list[LineItemSchema] = Field(default_factory=list)
     status: str = "draft"
     tag: Literal["shop", "hotel"] = "shop"  # Tag for filtering quotations
+    # Entity association: the hotel or shop this quotation belongs to. Supplied
+    # by the UI when the customer is a registered entity; omitted for walk-in
+    # customers, which keeps client_name the only identifier. Must match `tag`.
+    hotel_id: str | None = None
+    shop_id: str | None = None
 
 
 class QuotationUpdate(BaseModel):
@@ -73,6 +78,8 @@ class QuotationUpdate(BaseModel):
     line_items: list[LineItemSchema] | None = None
     status: str | None = None
     tag: Literal["shop", "hotel"] | None = None
+    hotel_id: str | None = None
+    shop_id: str | None = None
 
 
 class QuotationAdvanceStatus(BaseModel):
@@ -90,6 +97,8 @@ class QuotationResponse(BaseModel):
     status: str
     status_history: list[StatusHistoryEntry] = []
     tag: str = "shop"
+    hotel_id: str | None = None
+    shop_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

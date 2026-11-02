@@ -11,6 +11,7 @@ Contract (see architecture_updated_system/ARCHITECTURE.md):
   state is enforced at login/switch time in user-service; resource services
   additionally honor the snapshot (see residual R-note in THREAT_MODEL.md).
 """
+import re
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
@@ -109,6 +110,74 @@ def assert_same_laundry(doc: Optional[Dict[str, Any]], laundry_id: str, label: s
         actual = doc.get("laundry_id") or LOVE_LAUNDRY_ID
     if actual != laundry_id:
         raise HTTPException(status_code=404, detail=f"{label} not found")
+
+
+ACTIVE = "ACTIVE"
+
+# Which entity type each quotation tag may be associated with. A "shop"
+# quotation may name a shop and must never name a hotel, and vice versa.
+TAG_ENTITIES = {"shop": "SHOP", "hotel": "HOTEL"}
+
+
+def normalize_entity_id(value: Any) -> str:
+    """Validate an entity id shape before it is used in a query."""
+    slug = str(value or "").strip().lower()
+    if not slug:
+        return ""
+    if not re.match(r"^[a-z0-9][a-z0-9_-]{0,31}$", slug):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid entity id — use 1-32 lowercase letters, digits, '-' or '_'",
+        )
+    return slug
+
+
+def validate_entity_association(
+    *,
+    tag: Any,
+    hotel_id: Any,
+    shop_id: Any,
+    laundry_id: str,
+) -> Dict[str, Any]:
+    """Return the single entity reference a quotation may carry.
+
+    Enforces, in order:
+    - an id supplied for the side that does not match ``tag`` is rejected, so a
+      hotel quotation can never be filed against a shop;
+    - the id must exist in the ``hotels``/``shops`` registry **in this laundry**
+      — an id owned by another tenant reports 404, which keeps ids from being
+      probed across tenants;
+    - the entity must be ACTIVE: suspended customers do not accrue new work.
+
+    Returns ``{}`` when no entity was supplied, which is the walk-in case and
+    leaves the quotation keyed by ``client_name`` exactly as before.
+    """
+    side = TAG_ENTITIES.get(str(tag or "shop").strip().lower(), "SHOP")
+    wanted_raw = hotel_id if side == "HOTEL" else shop_id
+    foreign_raw = shop_id if side == "HOTEL" else hotel_id
+
+    if str(foreign_raw or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail=f"A {side.lower()}-tagged quotation cannot reference a "
+            f"{'shop' if side == 'HOTEL' else 'hotel'} entity",
+        )
+
+    wanted = normalize_entity_id(wanted_raw)
+    if not wanted:
+        return {}
+
+    from .database.main_db import hotels_collection, shops_collection
+
+    collection = hotels_collection if side == "HOTEL" else shops_collection
+    field = "hotel_id" if side == "HOTEL" else "shop_id"
+    doc = collection.find_one({field: wanted, "associated_laundry_id": laundry_id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="No such entity in this laundry")
+    if str(doc.get("status") or "").strip().upper() != ACTIVE:
+        raise HTTPException(status_code=403, detail="That entity is not active")
+
+    return {field: wanted}
 
 
 def owned_filter(oid, laundry_id: str) -> dict:
