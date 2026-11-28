@@ -145,7 +145,8 @@ def test_create_stores_the_entity_reference(quots, registries):
     resp = client.post(
         "/quotations",
         json={
-            "client_name": "Cinnamon Grand",
+            # The posted name is deliberately wrong: the registry must win.
+            "client_name": "Hand Typed Name",
             "tag": "hotel",
             "hotel_id": "cinnamon-grand",
             "line_items": [],
@@ -155,9 +156,11 @@ def test_create_stores_the_entity_reference(quots, registries):
 
     assert resp.status_code == 201, resp.text
     assert resp.json()["hotel_id"] == "cinnamon-grand"
+    assert resp.json()["client_name"] == "Cinnamon Grand"
 
     stored = raw.find_one({"laundry_id": LAUNDRY})
     assert stored["hotel_id"] == "cinnamon-grand"
+    assert stored["client_name"] == "Cinnamon Grand"
     assert "shop_id" not in stored
 
 
@@ -181,8 +184,50 @@ def test_create_rejects_a_hotel_id_on_a_shop_quotation(quots, registries):
     assert raw.count_documents({}) == 0
 
 
-def test_create_without_entity_still_works(quots, registries):
-    """Walk-in customers keep the name-only path."""
+def test_list_reads_the_hotel_name_from_the_registry(quots, registries):
+    """A rename in the hotels list is reflected without rewriting the quote."""
+    client, _raw = quots
+    hotels, _ = registries
+    _seed(hotels, "hotel_id", "cinnamon-grand", name="Cinnamon Grand")
+
+    created = client.post(
+        "/quotations",
+        json={
+            "client_name": "Cinnamon Grand",
+            "tag": "hotel",
+            "hotel_id": "cinnamon-grand",
+            "line_items": [],
+        },
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+    assert created.status_code == 201, created.text
+
+    hotels.update_one(
+        {"hotel_id": "cinnamon-grand"}, {"$set": {"name": "Cinnamon Grand Colombo"}}
+    )
+    listed = client.get(
+        "/quotations", headers={"Authorization": f"Bearer {_token()}"}
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()[0]["client_name"] == "Cinnamon Grand Colombo"
+
+
+def test_hotel_quotation_requires_a_registry_hotel(quots, registries):
+    """A hotel quotation is never a free-text walk-in."""
+    client, raw = quots
+
+    resp = client.post(
+        "/quotations",
+        json={"client_name": "Any Hotel", "tag": "hotel", "line_items": []},
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+
+    assert resp.status_code == 422
+    assert raw.count_documents({}) == 0
+
+
+def test_create_without_entity_still_works_for_walk_in_shop(quots, registries):
+    """Only shop quotations keep the legacy name-only path."""
     client, raw = quots
 
     resp = client.post(
@@ -196,8 +241,8 @@ def test_create_without_entity_still_works(quots, registries):
     assert resp.json()["shop_id"] is None
 
 
-def test_flipping_the_tag_clears_the_old_entity(quots, registries):
-    """A shop quotation switched to a hotel tag must not keep a shop_id."""
+def test_flipping_to_hotel_requires_a_registry_hotel(quots, registries):
+    """Switching to a hotel tag cannot leave the quotation uncoupled."""
     client, raw = quots
     hotels, shops = registries
     _seed(shops, "shop_id", "city-express")
@@ -216,15 +261,21 @@ def test_flipping_the_tag_clears_the_old_entity(quots, registries):
     assert created.status_code == 201, created.text
     qid = created.json()["id"]
 
-    updated = client.put(
+    rejected = client.put(
         f"/quotations/{qid}",
         json={"tag": "hotel", "client_name": "Cinnamon Grand"},
         headers={"Authorization": f"Bearer {_token()}"},
     )
+    assert rejected.status_code == 422
+    assert raw.find_one({"client_name": "City Express"})["shop_id"] == "city-express"
 
-    assert updated.status_code == 200, updated.text
-    body = updated.json()
-    # The shop association belonged to the old side; flipping the tag must drop
-    # it rather than reject the correction or leave a contradictory id behind.
+    accepted = client.put(
+        f"/quotations/{qid}",
+        json={"tag": "hotel", "hotel_id": "cinnamon-grand"},
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    body = accepted.json()
     assert body["shop_id"] is None
-    assert body["hotel_id"] is None
+    assert body["hotel_id"] == "cinnamon-grand"
+    assert body["client_name"] == "Cinnamon Grand"

@@ -149,8 +149,9 @@ def validate_entity_association(
       probed across tenants;
     - the entity must be ACTIVE: suspended customers do not accrue new work.
 
-    Returns ``{}`` when no entity was supplied, which is the walk-in case and
-    leaves the quotation keyed by ``client_name`` exactly as before.
+    A hotel quotation is never a walk-in: it must name a hotel from the
+    registry. Only shop quotations may return ``{}`` for the legacy walk-in
+    case, where ``client_name`` remains the sole identifier.
     """
     side = TAG_ENTITIES.get(str(tag or "shop").strip().lower(), "SHOP")
     wanted_raw = hotel_id if side == "HOTEL" else shop_id
@@ -165,6 +166,11 @@ def validate_entity_association(
 
     wanted = normalize_entity_id(wanted_raw)
     if not wanted:
+        if side == "HOTEL":
+            raise HTTPException(
+                status_code=422,
+                detail="A hotel quotation must be coupled to a hotel from the hotels list",
+            )
         return {}
 
     from .database.main_db import hotels_collection, shops_collection

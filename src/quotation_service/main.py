@@ -23,6 +23,7 @@ from .auth_helper import get_current_user, require_role
 from .security import apply_security
 from .tenant_scope import TenantClaimsMiddleware, insecure_flags
 from .tenancy import assert_same_laundry, resolve_laundry_id, validate_entity_association
+from .entity_display import hydrate_quotation, hydrate_quotations, registry_display
 from .database.main_db import ensure_indexes
 from .database.connection_manager import close_all
 from .routers.admin_database import router as admin_database_router
@@ -282,7 +283,7 @@ def get_all_quotations(
         quotations = repo.get_by_tag(tag, laundry_id=lid)
     else:
         quotations = repo.get_all(laundry_id=lid)
-    return quotations
+    return hydrate_quotations(quotations, lid)
 
 
 @app.get(
@@ -312,7 +313,7 @@ def get_quotation(
     assert_same_laundry(quotation, lid, "Quotation")
     if not quotation:
         raise HTTPException(status_code=404, detail="Quotation not found")
-    return quotation
+    return hydrate_quotation(quotation, lid)
 
 
 @app.post(
@@ -343,8 +344,20 @@ def create_quotation(
         laundry_id=lid,
     )
 
+    # The hotel name/code is owned by the hotels registry. Never trust a
+    # free-text client name for an entity-backed quotation.
+    registry_name, _code = registry_display(
+        tag=payload.tag,
+        hotel_id=payload.hotel_id,
+        shop_id=payload.shop_id,
+        laundry_id=lid,
+    )
+    client_name = registry_name or payload.client_name.strip()
+    if not client_name:
+        raise HTTPException(status_code=422, detail="Client / hotel name is required")
+
     quotation_data = {
-        "client_name": payload.client_name,
+        "client_name": client_name,
         "quotation_title": payload.quotation_title,
         "line_items": line_items_data,
         "status": payload.status,
@@ -364,7 +377,7 @@ def create_quotation(
 
     # Perform simple audit log trigger if needed
     # We will implement audit logs in the bill-service / dashboard API directly
-    return new_quotation
+    return hydrate_quotation(new_quotation, lid)
 
 
 @app.put(
@@ -390,7 +403,8 @@ def update_quotation(
     update_data = payload.model_dump(exclude_unset=True)
 
     # Re-validate the entity association whenever the tag or an entity id is
-    # being changed.
+    # being changed. Hotel quotations must always end up coupled to a registry
+    # hotel; only shop quotations may fall back to the walk-in name.
     if {"tag", "hotel_id", "shop_id"} & set(update_data):
         old_tag = str(current.get("tag") or "shop").strip().lower()
         new_tag = str(update_data.get("tag") or old_tag).strip().lower()
@@ -399,36 +413,55 @@ def update_quotation(
         # An id supplied in THIS request, as opposed to one inherited from the
         # stored record. `key in update_data` distinguishes "not sent" from
         # "sent as null", which is how a caller clears an association.
-        request_hotel = update_data.get("hotel_id")
-        request_shop = update_data.get("shop_id")
-        entity_supplied = bool(
-            ("hotel_id" in update_data and request_hotel)
-            or ("shop_id" in update_data and request_shop)
+        final_hotel = (
+            update_data.get("hotel_id")
+            if "hotel_id" in update_data
+            else current.get("hotel_id")
+        )
+        final_shop = (
+            update_data.get("shop_id")
+            if "shop_id" in update_data
+            else current.get("shop_id")
         )
 
-        if tag_changed and not entity_supplied:
-            # The stored association belongs to the old side and cannot survive
-            # a side change. Clearing beats rejecting: flipping a mis-tagged
-            # quotation is a legitimate correction.
-            update_data["hotel_id"] = None
-            update_data["shop_id"] = None
-        else:
-            entity = validate_entity_association(
-                tag=new_tag,
-                hotel_id=request_hotel
-                if "hotel_id" in update_data
-                else current.get("hotel_id"),
-                shop_id=request_shop
-                if "shop_id" in update_data
-                else current.get("shop_id"),
-                laundry_id=lid,
+        if new_tag == "hotel" and not final_hotel:
+            raise HTTPException(
+                status_code=422,
+                detail="A hotel quotation must be coupled to a hotel from the hotels list",
             )
-            # Write both fields so the abandoned side is cleared rather than
-            # left stale beside the new association.
-            update_data["hotel_id"] = entity.get("hotel_id")
-            update_data["shop_id"] = entity.get("shop_id")
 
+        if tag_changed and new_tag == "shop" and not (
+            "shop_id" in update_data and update_data.get("shop_id")
+        ):
+            # The stored hotel id cannot survive a move to the shop side.
+            final_hotel = None
+            final_shop = None
+
+        entity = validate_entity_association(
+            tag=new_tag,
+            hotel_id=final_hotel,
+            shop_id=final_shop,
+            laundry_id=lid,
+        )
+        # Write both fields so the abandoned side is cleared rather than left
+        # stale beside the new association.
+        update_data["hotel_id"] = entity.get("hotel_id")
+        update_data["shop_id"] = entity.get("shop_id")
         update_data["tag"] = new_tag
+
+    # Keep the display name tied to the registry record, even if the caller
+    # posted an old or hand-typed name.
+    final_tag = update_data.get("tag") or current.get("tag")
+    final_hotel_id = update_data.get("hotel_id", current.get("hotel_id"))
+    final_shop_id = update_data.get("shop_id", current.get("shop_id"))
+    registry_name, _code = registry_display(
+        tag=final_tag,
+        hotel_id=final_hotel_id,
+        shop_id=final_shop_id,
+        laundry_id=lid,
+    )
+    if registry_name:
+        update_data["client_name"] = registry_name
 
     if "line_items" in update_data and update_data["line_items"]:
         update_data["line_items"] = [
@@ -460,7 +493,7 @@ def update_quotation(
     if not updated_quotation:
         raise HTTPException(status_code=404, detail="Quotation not found")
 
-    return updated_quotation
+    return hydrate_quotation(updated_quotation, lid)
 
 
 @app.post(
@@ -511,7 +544,7 @@ def advance_quotation_status(
     updated = repo.update(qid, {"status": payload.status, "status_history": hist}, laundry_id=lid)
     if not updated:
         raise HTTPException(status_code=404, detail="Quotation not found")
-    return updated
+    return hydrate_quotation(updated, lid)
 
 
 @app.get(

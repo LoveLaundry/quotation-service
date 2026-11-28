@@ -65,9 +65,9 @@ class QuotationCreate(BaseModel):
     line_items: list[LineItemSchema] = Field(default_factory=list)
     status: str = "draft"
     tag: Literal["shop", "hotel"] = "shop"  # Tag for filtering quotations
-    # Entity association: the hotel or shop this quotation belongs to. Supplied
-    # by the UI when the customer is a registered entity; omitted for walk-in
-    # customers, which keeps client_name the only identifier. Must match `tag`.
+    # Entity association. A hotel quotation is always bound to a record from
+    # the hotels registry; `client_name` is taken from that record, never from
+    # a free-text field. Shops may still use the walk-in path for compatibility.
     hotel_id: str | None = None
     shop_id: str | None = None
 
@@ -99,6 +99,10 @@ class QuotationResponse(BaseModel):
     tag: str = "shop"
     hotel_id: str | None = None
     shop_id: str | None = None
+    # Resolved from the registry on read, so display code never has to guess a
+    # hotel code or keep a stale copy of the hotel name.
+    hotel_code: str | None = None
+    shop_code: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
